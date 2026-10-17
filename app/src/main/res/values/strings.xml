@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Puzzle Bot</string>
+    <string name="service_label">Puzzle Bot (Exponential Idle 15-Puzzle)</string>
+    <string name="service_description">Shows a small floating control over Exponential Idle. When you press Start it takes screenshots of the 15-Puzzle minigame, solves it, and taps the tiles for you. It looks at which windows are on screen (where they are, not what they say) so it pauses whenever a call, dialog, notification shade or other app covers the puzzle, and resumes when it is clear.</string>
+</resources>
