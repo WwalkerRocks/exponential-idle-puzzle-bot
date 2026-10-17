@@ -60,6 +60,7 @@ class BotService : AccessibilityService() {
         private const val SCREENSHOT_INTERVAL_MS = 340L // Android allows ~3 screenshots per second
         private const val PAUSE_LIMIT_MS = 3 * 60_000L // give up after being paused this long
         private const val CLEAR_FOR_MS = 600L // screen must stay clear this long before resuming
+        private const val MAX_BATCH_MS = 150L // window check at least this often while tapping
 
         @Volatile
         var instance: BotService? = null
@@ -110,6 +111,28 @@ class BotService : AccessibilityService() {
         // Google Play Games greeting come and go without the game sending a new event.
         main.removeCallbacks(refreshIsland)
         main.postDelayed(refreshIsland, 120)
+        guardInFlight()
+    }
+
+    // Points of the gesture being performed right now, and whether we cancelled it on purpose.
+    @Volatile
+    private var inFlight: List<PointF>? = null
+    @Volatile
+    private var safetyCancel = false
+
+    /**
+     * A window just appeared or changed. If it covers any tap that is still on its way, cancel the
+     * rest of the gesture: Android cancels a gesture in progress when a new one is sent, so send a
+     * single harmless tap to our own island (it is the topmost window and ignores short taps).
+     */
+    private fun guardInFlight() {
+        val pts = inFlight ?: return
+        val why = blocked(pts) ?: return
+        val at = island?.safeTapPoint() ?: return
+        safetyCancel = true
+        Log.i(TAG, "cancelling taps in progress: $why")
+        val path = Path().apply { moveTo(at.x, at.y) }
+        dispatchGesture(GestureDescription.Builder().addStroke(GestureDescription.StrokeDescription(path, 0, 1)).build(), null, null)
     }
 
     private val refreshIsland = Runnable {
@@ -208,6 +231,14 @@ class BotService : AccessibilityService() {
             return Rect(loc[0], loc[1], loc[0] + root.width, loc[1] + root.height)
         }
 
+        /** Centre of the status text: tapping it briefly does nothing. Null if not laid out. */
+        fun safeTapPoint(): PointF? {
+            if (text.width == 0 || !root.isAttachedToWindow) return null
+            val loc = IntArray(2)
+            text.getLocationOnScreen(loc)
+            return PointF(loc[0] + text.width / 2f, loc[1] + text.height / 2f)
+        }
+
         fun moveToTop() {
             params.x = 0
             params.y = dp(44f)
@@ -286,6 +317,7 @@ class BotService : AccessibilityService() {
         val ws = appWindows()
         if (ws.isEmpty()) return null // no window list: the screenshot checks still apply
         val (pkg, layer) = foreground(ws)
+        if (pkg == "com.android.systemui") return "the notification shade is open"
         if (pkg != null && !isGame(pkg)) return "Exponential Idle isn't in front"
         if (points.isEmpty() || pkg == null) return null
         val region = Region()
@@ -515,7 +547,11 @@ class BotService : AccessibilityService() {
                 if (buttonTaps >= 3) { stopBot("Stopped: the button didn't start a new game"); break }
                 status("${n}×$n solved — tapping button" + sessionSummary())
                 if (blocked(listOf(PointF(grid.buttonX(), grid.buttonY()))) != null) continue // pause at the top
-                if (!tap(grid.buttonX(), grid.buttonY())) { stopBot("Stopped: Android rejected the tap"); break }
+                if (!tap(grid.buttonX(), grid.buttonY())) {
+                    if (safetyCancel) { safetyCancel = false; continue }
+                    stopBot("Stopped: Android rejected the tap")
+                    break
+                }
                 buttonTaps++
                 solvedSinceTap = 0
                 justTappedButton = true
@@ -612,14 +648,19 @@ class BotService : AccessibilityService() {
     private fun tapCells(grid: Grid, moves: IntArray, alive: () -> Boolean): TapResult {
         val tapMs = settings.tapMs.toLong()
         val gap = settings.gapMs.toLong()
-        val per = min(settings.tapsPerGesture, GestureDescription.getMaxStrokeCount())
+        // Short gestures, so the window check runs often even at slow speeds.
+        val byTime = maxOf(1L, MAX_BATCH_MS / maxOf(1L, tapMs + gap)).toInt()
+        val per = minOf(settings.tapsPerGesture, GestureDescription.getMaxStrokeCount(), byTime)
         var i = 0
         while (i < moves.size) {
             if (!alive()) return TapResult.FAILED
             val end = min(moves.size, i + per)
             val pts = (i until end).map { PointF(grid.centerX(moves[it]), grid.centerY(moves[it])) }
             if (blocked(pts) != null) return TapResult.PAUSED
-            if (!dispatch(pts, tapMs, gap)) return TapResult.FAILED
+            if (!dispatch(pts, tapMs, gap)) {
+                if (safetyCancel) { safetyCancel = false; return TapResult.PAUSED }
+                return TapResult.FAILED
+            }
             i = end
             if (i < moves.size) sleepMs(gap)
         }
@@ -635,12 +676,18 @@ class BotService : AccessibilityService() {
         }
         val latch = CountDownLatch(1)
         var ok = false
-        val accepted = dispatchGesture(b.build(), object : GestureResultCallback() {
-            override fun onCompleted(g: GestureDescription) { ok = true; latch.countDown() }
-            override fun onCancelled(g: GestureDescription) { latch.countDown() }
-        }, main)
-        if (!accepted) return false
-        latch.await(15, TimeUnit.SECONDS)
+        safetyCancel = false
+        inFlight = points
+        try {
+            val accepted = dispatchGesture(b.build(), object : GestureResultCallback() {
+                override fun onCompleted(g: GestureDescription) { ok = true; latch.countDown() }
+                override fun onCancelled(g: GestureDescription) { latch.countDown() }
+            }, main)
+            if (!accepted) return false
+            latch.await(15, TimeUnit.SECONDS)
+        } finally {
+            inFlight = null
+        }
         return ok
     }
 
