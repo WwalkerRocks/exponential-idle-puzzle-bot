@@ -69,31 +69,41 @@ class Settings(context: Context) {
     fun games(n: Int) = int("games$n", 0)
     fun botMs(n: Int) = p.getLong("ms$n", 0L)
     fun taps(n: Int) = p.getLong("taps$n", 0L)
+    fun stars(n: Int) = p.getLong("stars$n", 0L)
 
     /** Records one finished board: [ms] = bot time spent on it, including claiming/starting. */
-    fun recordGame(n: Int, ms: Long, taps: Int) {
+    fun recordGame(n: Int, ms: Long, taps: Int, stars: Int) {
         p.edit()
             .putInt("games$n", games(n) + 1)
             .putLong("ms$n", botMs(n) + ms)
             .putLong("taps$n", taps(n) + taps)
+            .putLong("stars$n", stars(n) + stars)
             .apply()
     }
 
     fun starsPerMinute(n: Int): Double {
         val ms = botMs(n)
-        return if (ms <= 0) 0.0 else games(n) * Solvers.stars(n) * 60_000.0 / ms
+        return if (ms <= 0) 0.0 else stars(n) * 60_000.0 / ms
     }
+
+    /** Stars per board typed in by the user; 0 = use what the game shows on its claim button. */
+    fun manualStars(n: Int) = int("manualStars$n", 0)
+    fun setManualStars(n: Int, v: Int) = putInt("manualStars$n", v.coerceIn(0, 1_000_000_000))
+
+    /** Last reward read from the game's claim button (0 = never seen). */
+    fun lastReward(n: Int) = int("lastReward$n", 0)
+    fun setLastReward(n: Int, v: Int) { if (v != lastReward(n)) putInt("lastReward$n", v) }
 
     fun resetStats() {
         val e = p.edit()
-        for (n in 3..5) e.remove("games$n").remove("ms$n").remove("moves$n").remove("taps$n")
+        for (n in 3..5) e.remove("games$n").remove("ms$n").remove("moves$n").remove("taps$n").remove("stars$n")
         e.apply()
     }
 
     companion object {
-        const val MIN_GAP = 0
+        const val MIN_GAP = 1 // 0 would make one tap start as the previous ends (a two-finger touch)
         const val MAX_GAP = 400
-        const val MIN_TAP = 4
+        const val MIN_TAP = 1
         const val MIN_BUTTON_WAIT = 150
         const val MIN_SETTLE = 50
     }

@@ -80,6 +80,15 @@ class MainActivity : Activity() {
         col.addView(intField("Wait after claim/start button (ms)", settings.buttonWaitMs) { settings.buttonWaitMs = it })
         col.addView(intField("Wait after last tile tap (ms)", settings.settleMs) { settings.settleMs = it })
 
+        col.addView(header("Stars per board"))
+        col.addView(text("The game raises its star rewards as you progress. The bot reads the reward from the " +
+            "\"Claim N stars\" button by itself. Type a number only to override it (0 = automatic).", 13f))
+        for ((n, name) in listOf(3 to "Easy 3×3", 4 to "Medium 4×4", 5 to "Hard 5×5")) {
+            val seen = settings.lastReward(n)
+            val label = name + if (seen > 0) " (game says $seen★)" else ""
+            col.addView(intField(label, settings.manualStars(n)) { settings.setManualStars(n, it) })
+        }
+
         col.addView(header("Other"))
         col.addView(switch("Only show the bar over Exponential Idle", settings.onlyOverGame) {
             settings.onlyOverGame = it
@@ -118,9 +127,9 @@ class MainActivity : Activity() {
         statsText.text = buildString {
             for (n in 3..5) {
                 val g = settings.games(n)
-                append("${n}×$n (${Solvers.stars(n)}★): ")
+                append("${n}×$n: ")
                 if (g == 0) append("no games yet\n") else append(
-                    "$g games, %.1f s/game, %.0f taps/game, %.1f ★/min\n".format(
+                    "$g games, ${settings.stars(n)}★, %.2f s/game, %.0f taps/game, %.1f ★/min\n".format(
                         settings.botMs(n) / 1000.0 / g, settings.taps(n).toDouble() / g, settings.starsPerMinute(n),
                     ),
                 )
@@ -134,7 +143,7 @@ class MainActivity : Activity() {
         Thread {
             val sb = StringBuilder()
             val rnd = Random(SystemClock.uptimeMillis())
-            val tau = settings.tapMs + settings.gapMs
+            val tau = settings.tapMs + settings.gapMs + 0.0
             for (n in 3..5) {
                 val t0 = SystemClock.uptimeMillis()
                 Solvers.prepare(n)
@@ -155,9 +164,11 @@ class MainActivity : Activity() {
                 val avgMoves = moves.toDouble() / runs
                 val avgMs = ms.toDouble() / runs
                 // Rough cycle: taps + thinking + claim/start buttons + settling + a few screenshots.
-                val cycle = avgMoves * tau + avgMs + 2 * settings.buttonWaitMs + settings.settleMs + 1100
+                // Rough cycle: taps + thinking + claiming and starting the next board (~0.2 s).
+                val cycle = avgMoves * tau + avgMs + 200
+                val stars = settings.manualStars(n).takeIf { it > 0 } ?: settings.lastReward(n).takeIf { it > 0 } ?: Solvers.stars(n)
                 sb.append("${n}×$n: %.1f taps, %.0f ms avg (worst %d ms), setup %d ms → est. %.1f ★/min at %d ms/tap\n"
-                    .format(avgMoves, avgMs, worst, prep, Solvers.stars(n) * 60000.0 / cycle, tau))
+                    .format(avgMoves, avgMs, worst, prep, stars * 60000.0 / cycle, tau))
                 main.post { benchText.text = sb.toString() + "…" }
             }
             main.post { benchText.text = sb.toString().trimEnd() }

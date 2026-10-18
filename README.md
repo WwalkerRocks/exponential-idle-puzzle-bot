@@ -8,8 +8,8 @@ for you: it reads the board from the screen, solves it, taps the tiles, claims t
 > - **Unofficial.** Not made by, endorsed by, or affiliated with Conic Games (the makers of Exponential Idle) or Google.
 > - **Use at your own risk.** Automating a game may break its terms of service. Your progress or account could be
 >   affected. The authors take no responsibility for any consequences.
-> - **Powerful permission.** This is an Accessibility Service: while it runs it takes screenshots, sees which
->   windows are open and taps the screen for you. Only install it if you trust the code. Building it yourself
+> - **Powerful permission.** This is an Accessibility Service: while it runs it reads the puzzle from
+>   Exponential Idle's screen, sees which windows are open, can take screenshots, and taps the screen for you. Only install it if you trust the code. Building it yourself
 >   from source is the safest option.
 > - **Unsigned build.** The APK in Releases is signed with a debug key, not through Google Play. Android and
 >   Play Protect will warn you when you install it.
@@ -26,20 +26,26 @@ for you: it reads the board from the screen, solves it, taps the tiles, claims t
 
 A small floating bar (the "island") appears over Exponential Idle. Press ▶ and it loops:
 
-1. takes a screenshot and finds the board (3×3, 4×4 or 5×5, detected automatically),
-2. reads every number,
-3. computes a short solution,
-4. taps the tiles (one tap slides a whole row or column segment, like in the game),
-5. taps **Great! Claim N stars** and then the start button, and goes again.
+1. reads the board (3×3, 4×4 or 5×5, detected automatically) and the button under it,
+2. computes a short solution,
+3. taps the tiles (one tap slides a whole row or column segment, like in the game),
+4. taps **Great! Claim N stars**, which also starts the next board, and goes again.
 
-**Hard (5×5, 6★) gives the most stars per minute.** On the test phone (1080×2340, Android 16) it reached
-about **220 ★/min** on Hard, roughly 1.5 s per board, once the speed had tuned itself.
+Exponential Idle exposes its puzzle tiles and buttons to Android's accessibility system, so the bot reads
+the numbers directly. That's exact and fast. On Android 11–12, or if a game update changes this, it falls
+back to reading screenshots.
 
-| Difficulty | Stars | Moves (solver) | Taps with multi-tile slides |
-|---|---|---|---|
-| Easy 3×3   | 1 | 22 (optimal)        | ~18 |
-| Medium 4×4 | 3 | 53 (optimal)        | ~38 |
-| **Hard 5×5** | **6** | ~127 (near-optimal) | **~80** |
+**Hard (5×5) gives the most stars per minute.** The game raises its star rewards as you progress. The bot
+reads the real reward from the claim button, so its ★/min stats are accurate. On the test phone
+(1080×2340, Android 16) a Hard board takes about **0.37 s** once auto-tune settles, about 3,500★/min at 22★
+per board. That breaks down as ~35 ms thinking, ~190 ms tapping, ~35 ms until the game shows "Claim", and
+~115 ms to read the next board.
+
+| Difficulty | Moves (solver) | Taps with multi-tile slides |
+|---|---|---|
+| Easy 3×3   | 22 (optimal)        | ~18 |
+| Medium 4×4 | 53 (optimal)        | ~38 |
+| **Hard 5×5** | ~127 (near-optimal) | **~87** |
 
 ## Install
 
@@ -66,14 +72,16 @@ Allow your browser or file manager to install unknown apps. If Play Protect warn
 2. Open Exponential Idle → Stars → Minigames → **15-Puzzle** → pick a difficulty.
 3. Press **▶** on the island to start and **■** to stop. Drag the text to move the island; long-press it to open settings.
 4. The first 4×4/5×5 run spends a few seconds building solver tables; after that they are cached.
+5. **Stars per board** (settings screen): leave these at 0 to use the reward the game shows. Type a
+   number only to override it.
 
 ### Safety features
 - **Pauses when something covers the puzzle.** Before every group of taps it checks the window list. If a call
   screen, dialog, notification shade, keyboard, popup or another app is under any point it is about to tap, it
   stops tapping. It resumes once the screen has been clear for a moment and re-reads the board first. If it stays
   paused for 3 minutes, it stops.
-- **Verifies every board.** After the last tap it takes a screenshot. If the board isn't solved, it re-solves from
-  wherever the board ended up instead of guessing.
+- **Verifies every board.** After the last tap it waits for the game to show "Claim". If the board ends up
+  unsolved, it re-solves from wherever the board ended up instead of guessing.
 - **Never taps blind.** It only taps the claim/start button when the board reads as solved. If the board still
   looks solved right after a button tap, it looks again before tapping, so it never hits a new game's
   "I Give Up!" by accident.
@@ -82,8 +90,7 @@ Allow your browser or file manager to install unknown apps. If Play Protect warn
 
 ### Speed settings (settings screen)
 - **Auto-tune** (on by default): after clean boards the bot shortens the pause between taps, then the tap
-  length, and the waits after the last tap and after the button. If the game drops a tap, it undoes that step
-  and stays there for the session.
+  length, down to 1 ms each. If the game drops a tap, it undoes that step and stays there for the session.
 - **Slide several tiles per tap** (on by default).
 - **Taps per gesture** (default 20): use 1 if taps get lost even at slow speeds.
 
@@ -91,17 +98,20 @@ Allow your browser or file manager to install unknown apps. If Play Protect warn
 
 - The app requests **no Android permissions**, including **no internet access**. Nothing it sees leaves the phone.
 - As an Accessibility Service it can:
-  - take screenshots, to read the board;
+  - read Exponential Idle's puzzle: the tile numbers, their positions, and the text of the button under the board;
+  - take screenshots (only used when the puzzle can't be read directly);
   - perform taps;
   - see the list of open windows (their position and which app owns them), for the failsafe. It does **not** read
     the text or contents of other apps' windows.
-- Screenshots are processed in memory and discarded. The only exception: if it can't read the board, it saves
-  that one screenshot to `Android/data/io.github.wwalkerrocks.puzzlebot/files/debug` for troubleshooting. This
-  can be turned off in settings.
+- Nothing is stored except settings and stats. The only exception: if it can't read the board in screenshot mode,
+  it saves that one screenshot to `Android/data/io.github.wwalkerrocks.puzzlebot/files/debug` for
+  troubleshooting. This can be turned off in settings.
 
 ## How it works
 
-- `core/BoardReader.kt`: finds the grid from the thin tile-border lines, splits each tile into digit shapes,
+- `core/TreeBoard.kt`: turns the tile views the game exposes (number and screen bounds) into a board, and reads
+  the reward from the claim button. `BotService.readTree()` fetches them in a single request per board.
+- `core/BoardReader.kt` (screenshot fallback): finds the grid from the thin tile-border lines, splits each tile into digit shapes,
   and matches them to templates. Every number appears exactly once, so it picks the best one-to-one
   assignment (Hungarian algorithm) instead of guessing digit by digit. Templates refine themselves after every
   verified solve.

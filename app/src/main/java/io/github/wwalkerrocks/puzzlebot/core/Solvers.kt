@@ -30,8 +30,8 @@ object Solvers {
         prepare(n)
         return when (n) {
             3 -> s3!!.solve(board)
-            4 -> s4!!.solve(board, 3_000_000L)
-                ?: s4!!.solve(board, 3_000_000L, gNum = 4, hNum = 5)
+            4 -> s4!!.solve(board, 1_000_000L)
+                ?: s4!!.solve(board, 1_000_000L, gNum = 4, hNum = 5)
                 ?: s4!!.solve(board, gNum = 2, hNum = 3)!!
             else -> s5!!.solve(board)
         }

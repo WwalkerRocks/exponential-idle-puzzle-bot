@@ -212,11 +212,13 @@ class Solver5(
     }
 
     /** Above this the top row is placed in two cheaper steps (1-3, then 4-5). */
-    var rowNodeLimit = 400_000L
+    var rowNodeLimit = 25_000L
     /** Node budget for each attempt at the final 4x4 (optimal first, then inflated heuristics). */
-    var solver4NodeLimit = 1_000_000L
+    var solver4NodeLimit = 300_000L
     /** Time for looking at alternative row/column solutions, per orientation. */
-    var planBudgetMs = 40L
+    var planBudgetMs = 5L
+    /** Also plan column-first (the mirrored board) and keep the better of the two. */
+    var tryMirror = true
     /** Shortest top-row solutions considered / kept for a column search / column solutions considered. */
     var rowCandidates = 128
     var rowKeep = 8
@@ -241,6 +243,7 @@ class Solver5(
     fun plan(board: IntArray): Plan {
         require(board.size == 25)
         val direct = planOriented(board, false, System.nanoTime() + planBudgetMs * 1_000_000)
+        if (!tryMirror) return direct
         val mirrored = planOriented(mirror(board), true, System.nanoTime() + planBudgetMs * 1_000_000)
         return if (mirrored.score < direct.score) mirrored else direct
     }
