@@ -3,7 +3,10 @@ package io.github.wwalkerrocks.puzzlebot
 import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.GestureDescription
 import android.annotation.SuppressLint
+import android.content.BroadcastReceiver
+import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.graphics.Bitmap
 import android.graphics.Color
 import android.graphics.Path
@@ -28,6 +31,8 @@ import android.view.accessibility.AccessibilityNodeInfo
 import android.view.accessibility.AccessibilityWindowInfo
 import android.widget.LinearLayout
 import android.widget.TextView
+import io.github.wwalkerrocks.puzzlebot.core.ArrowReader
+import io.github.wwalkerrocks.puzzlebot.core.ArrowSolver
 import io.github.wwalkerrocks.puzzlebot.core.BoardReader
 import io.github.wwalkerrocks.puzzlebot.core.DigitTemplates
 import io.github.wwalkerrocks.puzzlebot.core.GrayImage
@@ -60,17 +65,20 @@ class BotService : AccessibilityService() {
     companion object {
         private const val TAG = "PuzzleBot"
         private const val MAX_READ_FAILS = 8
-        private const val SCREENSHOT_INTERVAL_MS = 340L // Android allows ~3 screenshots per second
+        private const val SCREENSHOT_INTERVAL_MS = 336L // Android allows one every 333 ms
         private const val PAUSE_LIMIT_MS = 3 * 60_000L // give up after being paused this long
         private const val CLEAR_FOR_MS = 600L // screen must stay clear this long before resuming
         private const val MAX_BATCH_MS = 150L // window check at least this often while tapping
         private const val STABLE_MS = 150L // board unchanged this long after the taps = some were dropped
         private const val NEW_GAME_WAIT_MS = 1500L // after the button, wait this long for a new board
+        private const val ARROW_SETTLE_MS = 400L // after the arrow taps, wait this long for "Claim" before re-checking
         private const val BOARD_CHECK_MS = 300L // while waiting for "Claim", look at the board this often (a full read is slow)
 
         @Volatile
         var instance: BotService? = null
             private set
+
+        const val ACTION_DUMP_TREE = "io.github.wwalkerrocks.puzzlebot.DUMP_TREE"
 
         fun isGame(pkg: String) = pkg.contains("exponential", true) || pkg.contains("conicgames", true)
     }
@@ -81,8 +89,13 @@ class BotService : AccessibilityService() {
     private var templates = DigitTemplates.DEFAULT.copy()
     private val templateFile get() = File(filesDir, "digits.bin")
     private val main = Handler(Looper.getMainLooper())
-    private val shotExecutor = Executors.newSingleThreadExecutor()
-    private val solveExec = Executors.newSingleThreadExecutor()
+    // The bot's threads run at display priority: the game is busy right when a new board appears,
+    // and at normal priority these threads were left waiting for a CPU for ~0.3 s each board.
+    private fun urgentThreads(name: String) = java.util.concurrent.ThreadFactory { r ->
+        Thread({ android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_URGENT_DISPLAY); r.run() }, name)
+    }
+    private val shotExecutor = Executors.newSingleThreadExecutor(urgentThreads("screenshot"))
+    private val solveExec = Executors.newSingleThreadExecutor(urgentThreads("solver"))
     private var island: Island? = null
 
     @Volatile
@@ -105,9 +118,36 @@ class BotService : AccessibilityService() {
         PatternDb.cacheDir = File(filesDir, "tables").apply { mkdirs() }
         Thread({
             for (n in 3..5) try { Solvers.prepare(n) } catch (e: Throwable) { Log.e(TAG, "prepare $n", e) }
+            if (!running) main.post { island?.setText("Puzzle Bot ready — open a 15-Puzzle or Arrow Puzzle") }
         }, "solver-warmup").apply { priority = Thread.MIN_PRIORITY; start() }
         if (!settings.onlyOverGame) showIsland()
         main.post(refreshIsland)
+        // Diagnostics over USB only: android.permission.DUMP is held by the adb shell, not by apps.
+        registerReceiver(diagnostics, IntentFilter(ACTION_DUMP_TREE), "android.permission.DUMP", null, RECEIVER_EXPORTED)
+    }
+
+    /** `adb shell am broadcast -a <ACTION_DUMP_TREE>` logs the game's accessibility tree. */
+    private val diagnostics = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            Thread { dumpTree(intent.getStringExtra("tag") ?: "adb") }.start()
+        }
+    }
+
+    /** Logs every node of the top app window: class, text, description, clickable, bounds. */
+    private fun dumpTree(tag: String) {
+        val w = appWindows().filter { it.type == AccessibilityWindowInfo.TYPE_APPLICATION }.maxByOrNull { it.layer } ?: return
+        val root = w.root ?: run { Log.i(TAG, "tree[$tag]: no root"); return }
+        val r = Rect()
+        var count = 0
+        fun walk(n: AccessibilityNodeInfo, depth: Int) {
+            if (count++ > 800) return
+            n.getBoundsInScreen(r)
+            Log.i(TAG, "tree[$tag] " + " ".repeat(depth) + "${n.className?.toString()?.substringAfterLast('.')} " +
+                "text=${n.text} desc=${n.contentDescription} state=${n.stateDescription} click=${n.isClickable} $r")
+            for (i in 0 until n.childCount) n.getChild(i)?.let { walk(it, depth + 1) }
+        }
+        walk(root, 0)
+        Log.i(TAG, "tree[$tag]: $count nodes, pkg=${root.packageName}")
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent) {
@@ -155,6 +195,7 @@ class BotService : AccessibilityService() {
     override fun onDestroy() {
         running = false
         hideIsland()
+        try { unregisterReceiver(diagnostics) } catch (_: Exception) {}
         shotExecutor.shutdownNow()
         solveExec.shutdownNow()
         instance = null
@@ -543,12 +584,76 @@ class BotService : AccessibilityService() {
         main.post { island?.setRunning(true) }
         worker = Thread({
             try {
-                if (Build.VERSION.SDK_INT >= 33) treeLoop(gen) else screenshotLoop(gen)
+                android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_URGENT_DISPLAY)
+                runBot(gen)
             } catch (e: Throwable) {
                 Log.e(TAG, "bot loop", e)
                 if (generation == gen) stopBot("Error: ${e.javaClass.simpleName} ${e.message ?: ""}")
             }
         }, "puzzle-bot").apply { start() }
+    }
+
+    private enum class Minigame { FIFTEEN, ARROW, TORUS, NONE }
+
+    /** Which minigame is open, from its title (or, failing that, from what's on the board). */
+    private fun minigame(): Minigame {
+        if (Build.VERSION.SDK_INT < 33) return Minigame.NONE
+        try {
+            clearCache()
+            val w = appWindows().filter { it.type == AccessibilityWindowInfo.TYPE_APPLICATION }.maxByOrNull { it.layer } ?: return Minigame.NONE
+            val root = w.getRoot(AccessibilityNodeInfo.FLAG_PREFETCH_DESCENDANTS_BREADTH_FIRST) ?: return Minigame.NONE
+            if (root.packageName?.toString()?.let(::isGame) != true) return Minigame.NONE
+            for (i in 0 until root.childCount) {
+                when (root.getChild(i)?.text?.toString()) {
+                    "15-Puzzle" -> return Minigame.FIFTEEN
+                    "Arrow Puzzle" -> return Minigame.ARROW
+                    "Torus Puzzle" -> return Minigame.TORUS
+                }
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "minigame", e)
+        }
+        // Other languages: recognise the board itself.
+        if (readArrowLayout() != null) return Minigame.ARROW
+        if (readTree() != null) return Minigame.FIFTEEN
+        return Minigame.NONE
+    }
+
+    /** Runs whichever minigame is open, switching when you switch. */
+    private fun runBot(gen: Int) {
+        fun alive() = running && generation == gen
+        if (Build.VERSION.SDK_INT < 33) { screenshotLoop(gen); return }
+        var noneSince = -1L
+        var fifteenFailures = 0
+        while (alive()) {
+            when (minigame()) {
+                Minigame.FIFTEEN -> {
+                    noneSince = -1
+                    if (treeLoop(gen)) fifteenFailures = 0
+                    else if (++fifteenFailures >= 2) { screenshotLoop(gen); return }
+                }
+                Minigame.ARROW -> {
+                    noneSince = -1
+                    if (!arrowLoop(gen) && alive()) { stopBot("Stopped: couldn't read the Arrow Puzzle"); return }
+                }
+                Minigame.TORUS -> { stopBot("Torus Puzzle isn't supported yet"); return }
+                Minigame.NONE -> {
+                    if (blocked(emptyList()) != null) {
+                        if (!waitUntilClear(emptyList(), ::alive)) { if (alive()) stopBot("Stopped: paused for more than ${PAUSE_LIMIT_MS / 60_000} minutes"); return }
+                        continue
+                    }
+                    val now = SystemClock.uptimeMillis()
+                    if (noneSince < 0) noneSince = now
+                    if (now - noneSince > 1500) {
+                        // Not recognised from the game's views: try reading a 15-Puzzle from screenshots.
+                        screenshotLoop(gen)
+                        return
+                    }
+                    status("Looking for a puzzle…")
+                    sleepMs(150)
+                }
+            }
+        }
     }
 
     fun stopBot(reason: String) {
@@ -616,6 +721,7 @@ class BotService : AccessibilityService() {
 
     /** Fallback loop: reads the board from screenshots (if the game's views can't be read). */
     private fun screenshotLoop(gen: Int) {
+        settings.profile = ""
         fun alive() = running && generation == gen
         var fails = 0
         var buttonTaps = 0
@@ -697,8 +803,8 @@ class BotService : AccessibilityService() {
                         templates.learn(prev.board, prev.glyphs)
                         try { templates.save(templateFile) } catch (_: Exception) {}
                     }
-                    val reward = rewardFor(n, null)
-                    settings.recordGame(n, pendingMs, gameTaps, reward)
+                    val reward = settings.rewardFor("$n", null)
+                    settings.recordGame("$n", pendingMs, gameTaps, reward)
                     pendingMs = 0
                     sessionGames++
                     sessionStars += reward
@@ -811,14 +917,6 @@ class BotService : AccessibilityService() {
         return result to taps
     }
 
-    /** Stars for one board: the manual setting if set, else what the game said, else the base value. */
-    private fun rewardFor(n: Int, fromGame: Int?): Int {
-        val manual = settings.manualStars(n)
-        val r = if (manual > 0) manual else fromGame ?: Solvers.stars(n)
-        if (fromGame != null) settings.setLastReward(n, fromGame)
-        return r
-    }
-
     private fun resetTuning() {
         successStreak = 0
         gapFloor = Settings.MIN_GAP
@@ -832,8 +930,11 @@ class BotService : AccessibilityService() {
      * board now and then in case some taps were lost; after claiming it waits for the button to
      * change back, then reads the new board.
      */
-    private fun treeLoop(gen: Int) {
+    /** Returns when the 15-Puzzle is gone (true if it read at least one board). */
+    private fun treeLoop(gen: Int): Boolean {
         fun alive() = running && generation == gen
+        settings.profile = ""
+        var sawBoard = false
         val fresh = 0
         val waitSolved = 1
         val waitNew = 2
@@ -862,8 +963,8 @@ class BotService : AccessibilityService() {
             val now = SystemClock.uptimeMillis()
             Log.i(TAG, "solved seen ${now - tapsDoneAt}ms after the last tap ($buttonPolls button checks)")
             claimedAt = now
-            val stars = rewardFor(gameN, reward)
-            settings.recordGame(gameN, now - lastRecord, gameTaps, stars)
+            val stars = settings.rewardFor("$gameN", reward)
+            settings.recordGame("$gameN", now - lastRecord, gameTaps, stars)
             lastRecord = now
             sessionGames++
             sessionStars += stars
@@ -929,14 +1030,14 @@ class BotService : AccessibilityService() {
             if (v == null) {
                 if (missingSince < 0) missingSince = now
                 if (now - missingSince > 1500) {
-                    Log.i(TAG, "board not found in the game's views; switching to screenshots")
-                    screenshotLoop(gen)
-                    return
+                    Log.i(TAG, "15-Puzzle board not in the game's views anymore")
+                    return sawBoard
                 }
                 sleepMs(30)
                 continue
             }
             missingSince = -1
+            sawBoard = true
             val b = v.board
             if (!b.aligned) { sleepMs(3); continue } // tiles still sliding
             val n = b.n
@@ -982,7 +1083,255 @@ class BotService : AccessibilityService() {
         }
         if (sessionMissed > 0) Log.i(TAG, "solutions with dropped taps: $sessionMissed")
         Log.i(TAG, "solved noticed on the button $buttonSignals of $sessionGames times")
+        return sawBoard
     }
+
+    // ------------------------------------------------------------------ Arrow Puzzle
+
+    /** Tile bounds ([left, top, right, bottom]), which tiles each tap turns, and whether it's the hex board. */
+    private class ArrowLayout(val tiles: List<IntArray>, val hex: Boolean, val touching: Array<IntArray>, val side: Int)
+
+    /**
+     * Finds the Arrow Puzzle's tiles in the game's views: a group of 9+ identical square views
+     * with no text. (Their arrows aren't in the views, so directions come from a screenshot.) Also
+     * remembers the button under the board so [buttonText] works.
+     */
+    private fun readArrowLayout(): ArrowLayout? {
+        if (Build.VERSION.SDK_INT < 33) return null
+        try {
+            clearCache()
+            val w = appWindows().filter { it.type == AccessibilityWindowInfo.TYPE_APPLICATION }.maxByOrNull { it.layer } ?: return null
+            val root = w.getRoot(AccessibilityNodeInfo.FLAG_PREFETCH_DESCENDANTS_BREADTH_FIRST) ?: return null
+            if (root.packageName?.toString()?.let(::isGame) != true) return null
+            val r = Rect()
+            val squares = ArrayList<IntArray>()
+            for (i in 0 until root.childCount) {
+                val c = root.getChild(i) ?: continue
+                if (!c.text.isNullOrEmpty() || c.childCount != 0 || c.className?.toString()?.endsWith("ViewGroup") != true) continue
+                c.getBoundsInScreen(r)
+                if (r.width() < 80 || kotlin.math.abs(r.width() - r.height()) > 4) continue
+                squares.add(intArrayOf(r.left, r.top, r.right, r.bottom))
+            }
+            // The tiles are the biggest group of equal-sized squares.
+            val tiles = squares.groupBy { it[2] - it[0] }.entries
+                .map { (size, list) -> list + squares.filter { s -> s !in list && kotlin.math.abs((s[2] - s[0]) - size) <= 4 } }
+                .maxByOrNull { it.size }?.distinct() ?: return null
+            if (tiles.size < 9) return null
+            val sorted = tiles.sortedWith(compareBy({ it[1] }, { it[0] }))
+            val cx = FloatArray(sorted.size) { (sorted[it][0] + sorted[it][2]) / 2f }
+            val cy = FloatArray(sorted.size) { (sorted[it][1] + sorted[it][3]) / 2f }
+            val side = kotlin.math.sqrt(sorted.size.toDouble()).toInt()
+            val distinctX = cx.map { (it / 10).toInt() }.toSet().size
+            val hex = !(side * side == sorted.size && distinctX == side)
+
+            // The button right below the tiles.
+            val bottom = sorted.maxOf { it[3] }
+            val top = sorted.minOf { it[1] }
+            treeButtonIndex = -1
+            treeButtonAt = null
+            for (i in 0 until root.childCount) {
+                val c = root.getChild(i) ?: continue
+                if (c.className?.toString()?.endsWith("Button") != true) continue
+                c.getBoundsInScreen(r)
+                if (r.top < bottom - 5 || r.top > bottom + (bottom - top) * 0.4f) continue
+                treeButtonIndex = i
+                treeButtonAt = PointF(r.exactCenterX(), r.exactCenterY())
+                break
+            }
+            treeParent = root
+            treeBoardBottom = bottom
+            treeBoardHeight = bottom - top
+            return ArrowLayout(sorted, hex, ArrowSolver.neighbours(cx, cy), side)
+        } catch (e: Exception) {
+            Log.w(TAG, "readArrowLayout", e)
+            return null
+        }
+    }
+
+    /**
+     * Arrow Puzzle loop: read the tiles from the game's views and the arrows from one screenshot,
+     * solve the taps exactly, tap, wait for "Claim", claim (which starts the next board), repeat.
+     * Returns false if the board couldn't be read at all, true when the puzzle is closed.
+     */
+    private fun arrowLoop(gen: Int): Boolean {
+        fun alive() = running && generation == gen
+        settings.profile = Settings.ARROW
+        resetTuning()
+        var layout = readArrowLayout() ?: return false
+        val fresh = 0
+        val waitSolved = 1
+        val waitNew = 2
+        var phase = fresh
+        var phaseStart = 0L
+        var lastRecord = SystemClock.uptimeMillis()
+        var lastGuard = 0L
+        var gameTaps = 0
+        var key = ""
+        var buttonTaps = 0
+        var unclear = 0
+        var prevState: IntArray? = null
+        val prepared = HashMap<Int, ArrowSolver.Prepared>() // per modulus, for the current layout
+        var preparedFor: ArrowLayout? = null
+        // A new board's arrows animate into place. Wait this long before the first screenshot:
+        // it grows when that screenshot comes back unclear (a retry costs ~0.34 s, Android's
+        // screenshot spacing) and shrinks slowly otherwise.
+        var newBoardWait = 40L
+        var newBoardAt = -1L
+        var newBoardCpu = 0L
+        var firstLook = false
+        var checkedIsland = false
+        treeParent = null
+
+        fun guard(): List<PointF> = layout.tiles.map { PointF((it[0] + it[2]) / 2f, (it[1] + it[3]) / 2f) } +
+            listOfNotNull(treeButtonAt)
+
+        fun claim(): Boolean {
+            val at = treeButtonAt ?: return false
+            if (blocked(listOf(at)) != null) { lastGuard = 0; phase = fresh; return true }
+            if (buttonTaps >= 3) { stopBot("Stopped: the button didn't start a new board"); return false }
+            if (!tap(at.x, at.y)) {
+                if (safetyCancel) { safetyCancel = false; phase = fresh; return true }
+                stopBot("Stopped: Android rejected the tap")
+                return false
+            }
+            buttonTaps++
+            phase = waitNew
+            phaseStart = SystemClock.uptimeMillis()
+            return true
+        }
+
+        fun finish(reward: Int?) {
+            val now = SystemClock.uptimeMillis()
+            val stars = settings.rewardFor(key, reward)
+            settings.recordGame(key, now - lastRecord, gameTaps, stars)
+            lastRecord = now
+            sessionGames++
+            sessionStars += stars
+            gameTaps = 0
+            tuneFaster()
+        }
+
+        status("Starting the Arrow Puzzle…")
+        while (alive()) {
+            if (SystemClock.uptimeMillis() - lastGuard > 250) {
+                lastGuard = SystemClock.uptimeMillis()
+                if (blocked(guard()) != null) {
+                    if (!waitUntilClear(guard(), ::alive)) {
+                        if (alive()) stopBot("Stopped: paused for more than ${PAUSE_LIMIT_MS / 60_000} minutes")
+                        return true
+                    }
+                    status("Resuming…")
+                    phase = fresh
+                    continue
+                }
+            }
+            if (treeParent == null) layout = readArrowLayout() ?: return true
+            val now = SystemClock.uptimeMillis()
+
+            if (phase == waitSolved || phase == waitNew) {
+                val text = buttonText()
+                val reward = TreeBoard.reward(text)
+                if (phase == waitSolved) {
+                    if (reward != null) {
+                        finish(reward)
+                        status("Arrow board solved — claiming $reward★" + sessionSummary())
+                        if (!claim()) return true
+                        continue
+                    }
+                    // No "Claim" yet. Give the game time to work through the taps, then look again.
+                    if (now - phaseStart < ARROW_SETTLE_MS) { sleepMs(3); continue }
+                    phase = fresh
+                } else {
+                    if (reward != null && now - phaseStart < NEW_GAME_WAIT_MS) { sleepMs(3); continue }
+                    if (reward != null) { if (!claim()) return true; continue } // still "Claim": tap again
+                    buttonTaps = 0
+                    phase = fresh // same layout as before; it is re-read if the arrows stop making sense
+                    newBoardAt = SystemClock.uptimeMillis()
+                    newBoardCpu = SystemClock.currentThreadTimeMillis()
+                    firstLook = true
+                    sleepMs(newBoardWait)
+                }
+            }
+
+            // Read the arrows from a screenshot of just the board.
+            val area = Rect(layout.tiles.minOf { it[0] }, layout.tiles.minOf { it[1] }, layout.tiles.maxOf { it[2] }, layout.tiles.maxOf { it[3] })
+            val shotAt = SystemClock.uptimeMillis()
+            val shotCpu = SystemClock.currentThreadTimeMillis()
+            val img = capture(area) ?: run { sleepMs(100); null } ?: continue
+            val shotDone = SystemClock.uptimeMillis()
+            if (!checkedIsland) { checkedIsland = true; keepIslandClear(Grid(1, layout.tiles.minOf { it[0] }.toFloat(), layout.tiles.minOf { it[1] }.toFloat(), layout.tiles.maxOf { it[2] }.toFloat(), layout.tiles.maxOf { it[3] }.toFloat())) }
+            val dirs = ArrowReader.read(img, layout.tiles, if (layout.hex) 6 else 4)
+            if (dirs == null) {
+                // Arrows still turning, or something on top: look again shortly.
+                if (firstLook) {
+                    Log.i(TAG, "arrows unclear ${shotAt - newBoardAt}ms after the new board; waiting ${newBoardWait}ms -> ${minOf(300L, newBoardWait + 20)}ms")
+                    newBoardWait = minOf(300L, newBoardWait + 20)
+                    firstLook = false
+                }
+                if (++unclear >= 12) {
+                    saveDebug(img, "arrows unclear")
+                    stopBot("Stopped: can't read the arrows")
+                    return true
+                }
+                if (unclear >= 2) layout = readArrowLayout() ?: return true
+                sleepMs(60)
+                continue
+            }
+            unclear = 0
+            if (firstLook && dirs.all { it == 0 }) {
+                // Still the old (solved) board: the new arrows aren't drawn yet. Look again as soon
+                // as Android allows, and start a little later next time.
+                newBoardWait = minOf(300L, newBoardWait + 25)
+                firstLook = false
+                continue
+            }
+            if (firstLook) { newBoardWait = maxOf(0L, newBoardWait - 3); firstLook = false }
+            if (dirs.all { it == 0 }) {
+                // All up already: the game should be offering "Claim".
+                phase = waitSolved
+                phaseStart = SystemClock.uptimeMillis() - ARROW_SETTLE_MS / 2
+                continue
+            }
+            val hard = layout.hex && dirs.all { it == 0 || it == 3 }
+            val m = if (!layout.hex) 4 else if (hard) 2 else 6
+            val state = if (hard) IntArray(dirs.size) { if (dirs[it] == 3) 1 else 0 } else dirs
+            key = if (!layout.hex) "a${layout.side}" else if (hard) "h2" else "h6"
+            if (prevState != null && prevState.contentEquals(state) && gameTaps > 0) {
+                // Same arrows as before our taps: they had no effect or the game is still busy.
+                sessionMissed++
+                tuneSlower()
+            }
+            prevState = state
+            val readDone = SystemClock.uptimeMillis()
+            if (preparedFor !== layout) { prepared.clear(); preparedFor = layout }
+            val solver = prepared.getOrPut(m) { ArrowSolver.Prepared(layout.touching, m) }
+            val taps = solver.solve(state)
+            Log.i(TAG, "arrow timing: since button ${shotAt - newBoardAt}ms (cpu ${shotCpu - newBoardCpu}ms), screenshot ${shotDone - shotAt}ms, read ${readDone - shotDone}ms, solve ${SystemClock.uptimeMillis() - readDone}ms (wait $newBoardWait)")
+            if (taps == null) {
+                Log.i(TAG, "arrow board has no solution: misread, looking again")
+                layout = readArrowLayout() ?: return true
+                sleepMs(100)
+                continue
+            }
+            val order = ArrowSolver.tapOrder(taps)
+            val points = order.map { val t = layout.tiles[it]; PointF((t[0] + t[2]) / 2f, (t[1] + t[3]) / 2f) }
+            status("Arrow ${boardName(key)}: ${order.size} taps, tap ${settings.tapMs}+${settings.gapMs}ms" + sessionSummary())
+            val t0 = SystemClock.uptimeMillis()
+            when (tapPoints(points, ::alive)) {
+                TapResult.PAUSED -> { phase = fresh; lastGuard = 0; continue }
+                TapResult.FAILED -> { if (alive()) stopBot("Stopped: Android cancelled the taps"); return true }
+                TapResult.DONE -> {}
+            }
+            Log.i(TAG, "arrow $key: ${order.size} taps in ${SystemClock.uptimeMillis() - t0}ms, tap ${settings.tapMs}ms gap ${settings.gapMs}ms, " +
+                "screenshot+read+solve ${t0 - shotAt}ms, early screenshots retried $shotRetries")
+            gameTaps += order.size
+            phase = waitSolved
+            phaseStart = SystemClock.uptimeMillis()
+        }
+        return true
+    }
+
+    private fun boardName(key: String) = when (key) { "a3" -> "Easy"; "a4" -> "Medium"; "h2" -> "Hard"; "h6" -> "Expert"; else -> key }
 
     /** If the island sits over the board or the button, move it to the top so taps don't hit it. */
     private fun keepIslandClear(grid: Grid) {
@@ -998,24 +1347,28 @@ class BotService : AccessibilityService() {
 
     private fun tap(x: Float, y: Float) = dispatch(listOf(PointF(x, y)), settings.tapMs.toLong(), 0L)
 
-    private fun tapCells(grid: Grid, moves: IntArray, alive: () -> Boolean): TapResult {
+    private fun tapCells(grid: Grid, moves: IntArray, alive: () -> Boolean): TapResult =
+        tapPoints(moves.map { PointF(grid.centerX(it), grid.centerY(it)) }, alive)
+
+    /** Taps the points in order, a short gesture at a time, checking the screen before each gesture. */
+    private fun tapPoints(points: List<PointF>, alive: () -> Boolean): TapResult {
         val tapMs = settings.tapMs.toLong()
         val gap = settings.gapMs.toLong()
         // Short gestures, so the window check runs often even at slow speeds.
         val byTime = maxOf(1L, MAX_BATCH_MS / maxOf(1L, tapMs + gap)).toInt()
         val per = minOf(settings.tapsPerGesture, GestureDescription.getMaxStrokeCount(), byTime)
         var i = 0
-        while (i < moves.size) {
+        while (i < points.size) {
             if (!alive()) return TapResult.FAILED
-            val end = min(moves.size, i + per)
-            val pts = (i until end).map { PointF(grid.centerX(moves[it]), grid.centerY(moves[it])) }
+            val end = min(points.size, i + per)
+            val pts = points.subList(i, end)
             if (blocked(pts) != null) return TapResult.PAUSED
             if (!dispatch(pts, tapMs, gap)) {
                 if (safetyCancel) { safetyCancel = false; return TapResult.PAUSED }
                 return TapResult.FAILED
             }
             i = end
-            if (i < moves.size) sleepMs(gap)
+            if (i < points.size) sleepMs(gap)
         }
         return TapResult.DONE
     }
@@ -1051,9 +1404,27 @@ class BotService : AccessibilityService() {
     private var argb: IntArray? = null
     private var luma: ByteArray? = null
 
-    private fun capture(): GrayImage? {
-        sleepMs(lastShot + SCREENSHOT_INTERVAL_MS - SystemClock.uptimeMillis())
-        lastShot = SystemClock.uptimeMillis()
+    private var shotRetries = 0L
+
+    /**
+     * Screenshot (grey). Android allows one every ~333 ms; a request that arrives a little early
+     * is rejected, so retry it a few milliseconds later instead of waiting another full interval.
+     */
+    private fun capture(region: Rect? = null): GrayImage? {
+        for (attempt in 0 until 15) {
+            sleepMs(lastShot + SCREENSHOT_INTERVAL_MS - SystemClock.uptimeMillis())
+            val requested = SystemClock.uptimeMillis()
+            shotError = 0
+            val img = captureOnce(region)
+            if (img != null) { lastShot = requested; return img }
+            if (shotError != ERROR_TAKE_SCREENSHOT_INTERVAL_TIME_SHORT) { lastShot = requested; return null }
+            shotRetries++
+            sleepMs(12)
+        }
+        return null
+    }
+
+    private fun captureOnce(region: Rect?): GrayImage? {
         val latch = CountDownLatch(1)
         var result: GrayImage? = null
         takeScreenshot(Display.DEFAULT_DISPLAY, shotExecutor, object : TakeScreenshotCallback {
@@ -1068,9 +1439,26 @@ class BotService : AccessibilityService() {
                         val w = bmp.width
                         val h = bmp.height
                         val px = argb?.takeIf { it.size == w * h } ?: IntArray(w * h).also { argb = it }
-                        bmp.getPixels(px, 0, w, 0, 0, w, h)
-                        bmp.recycle()
-                        result = GrayImage.fromArgb(px, w, h, luma).also { luma = it.px }
+                        val r = region?.let { Rect(it).apply { if (!intersect(0, 0, w, h)) setEmpty() } }
+                        if (r == null || r.isEmpty) {
+                            bmp.getPixels(px, 0, w, 0, 0, w, h)
+                            bmp.recycle()
+                            result = GrayImage.fromArgb(px, w, h, luma).also { luma = it.px }
+                        } else {
+                            // Only the board is needed: convert just that part.
+                            bmp.getPixels(px, r.top * w + r.left, w, r.left, r.top, r.width(), r.height())
+                            bmp.recycle()
+                            val out = luma?.takeIf { it.size == w * h } ?: ByteArray(w * h).also { luma = it }
+                            for (y in r.top until r.bottom) {
+                                var i = y * w + r.left
+                                for (x in r.left until r.right) {
+                                    val c = px[i]
+                                    out[i] = ((((c shr 16) and 0xFF) * 77 + ((c shr 8) and 0xFF) * 150 + (c and 0xFF) * 29) shr 8).toByte()
+                                    i++
+                                }
+                            }
+                            result = GrayImage(w, h, out)
+                        }
                     }
                 } catch (e: Exception) {
                     Log.w(TAG, "screenshot", e)

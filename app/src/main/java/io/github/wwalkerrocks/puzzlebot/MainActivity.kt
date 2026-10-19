@@ -47,7 +47,7 @@ class MainActivity : Activity() {
         setContentView(ScrollView(this).apply { addView(col) })
 
         col.addView(text("Puzzle Bot for Exponential Idle", 22f, bold = true))
-        col.addView(text("Solves the 15-Puzzle minigame for you: it reads the board from the screen, " +
+        col.addView(text("Solves the 15-Puzzle and Arrow Puzzle minigames for you: it reads the board from the screen, " +
             "finds a short solution and taps the tiles, then claims the stars and starts the next board.", 14f))
 
         col.addView(header("1. Turn on the service"))
@@ -63,12 +63,12 @@ class MainActivity : Activity() {
         })
 
         col.addView(header("2. Use it"))
-        col.addView(text("• Open Exponential Idle → Stars → Minigames → 15-Puzzle and pick a difficulty.\n" +
+        col.addView(text("• Open Exponential Idle → Stars → Minigames → 15-Puzzle or Arrow Puzzle and pick a difficulty.\n" +
             "• A small bar appears near the top. Press ▶ to start, ■ to stop. Drag the text to move it; " +
             "long-press the text to come back here.\n" +
-            "• The bot works on Easy, Medium and Hard. Hard (6★) is usually the most stars per minute " +
-            "once the speed has tuned itself; compare your own numbers in the stats below.\n" +
-            "• It stops by itself if you leave the game or it can't see the puzzle.\n" +
+            "• Every difficulty of both puzzles works, and it notices when you switch. Compare ★/min in the " +
+            "stats below to pick the best one (Arrow Expert pays the most per board).\n" +
+            "• It pauses if something covers the puzzle and stops if it can't see a puzzle.\n" +
             "• Tip: turn on Do Not Disturb so notifications don't cover the board.", 14f))
 
         col.addView(header("Speed"))
@@ -83,10 +83,10 @@ class MainActivity : Activity() {
         col.addView(header("Stars per board"))
         col.addView(text("The game raises its star rewards as you progress. The bot reads the reward from the " +
             "\"Claim N stars\" button by itself. Type a number only to override it (0 = automatic).", 13f))
-        for ((n, name) in listOf(3 to "Easy 3×3", 4 to "Medium 4×4", 5 to "Hard 5×5")) {
-            val seen = settings.lastReward(n)
-            val label = name + if (seen > 0) " (game says $seen★)" else ""
-            col.addView(intField(label, settings.manualStars(n)) { settings.setManualStars(n, it) })
+        for (b in Settings.BOARDS) {
+            val seen = settings.lastReward(b.key)
+            val label = b.label + if (seen > 0) " (game says $seen★)" else ""
+            col.addView(intField(label, settings.manualStars(b.key)) { settings.setManualStars(b.key, it) })
         }
 
         col.addView(header("Other"))
@@ -125,16 +125,19 @@ class MainActivity : Activity() {
         serviceState.text = if (on) "✓ Service is ON" else "✗ Service is OFF — enable \"Puzzle Bot\" under Accessibility → Installed apps"
         serviceState.setTextColor(if (on) 0xFF43A047.toInt() else 0xFFE53935.toInt())
         statsText.text = buildString {
-            for (n in 3..5) {
-                val g = settings.games(n)
-                append("${n}×$n: ")
-                if (g == 0) append("no games yet\n") else append(
-                    "$g games, ${settings.stars(n)}★, %.2f s/game, %.0f taps/game, %.1f ★/min\n".format(
-                        settings.botMs(n) / 1000.0 / g, settings.taps(n).toDouble() / g, settings.starsPerMinute(n),
-                    ),
-                )
+            for (b in Settings.BOARDS) {
+                val g = settings.games(b.key)
+                if (g == 0) continue
+                append("${b.label}: $g games, ${settings.stars(b.key)}★, %.2f s/game, %.0f taps/game, %.1f ★/min\n".format(
+                    settings.botMs(b.key) / 1000.0 / g, settings.taps(b.key).toDouble() / g, settings.starsPerMinute(b.key),
+                ))
             }
-            append("Current tap ${settings.tapMs} ms + pause ${settings.gapMs} ms, settle ${settings.settleMs} ms, button wait ${settings.buttonWaitMs} ms")
+            if (Settings.BOARDS.none { settings.games(it.key) > 0 }) append("No games yet.\n")
+            settings.profile = ""
+            append("15-Puzzle speed: tap ${settings.tapMs} ms + pause ${settings.gapMs} ms\n")
+            settings.profile = Settings.ARROW
+            append("Arrow Puzzle speed: tap ${settings.tapMs} ms + pause ${settings.gapMs} ms")
+            settings.profile = ""
         }
     }
 
@@ -163,10 +166,9 @@ class MainActivity : Activity() {
                 }
                 val avgMoves = moves.toDouble() / runs
                 val avgMs = ms.toDouble() / runs
-                // Rough cycle: taps + thinking + claim/start buttons + settling + a few screenshots.
                 // Rough cycle: taps + thinking + claiming and starting the next board (~0.2 s).
                 val cycle = avgMoves * tau + avgMs + 200
-                val stars = settings.manualStars(n).takeIf { it > 0 } ?: settings.lastReward(n).takeIf { it > 0 } ?: Solvers.stars(n)
+                val stars = settings.manualStars("$n").takeIf { it > 0 } ?: settings.lastReward("$n").takeIf { it > 0 } ?: Solvers.stars(n)
                 sb.append("${n}×$n: %.1f taps, %.0f ms avg (worst %d ms), setup %d ms → est. %.1f ★/min at %d ms/tap\n"
                     .format(avgMoves, avgMs, worst, prep, stars * 60000.0 / cycle, tau))
                 main.post { benchText.text = sb.toString() + "…" }

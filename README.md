@@ -1,6 +1,6 @@
 # Puzzle Bot for Exponential Idle
 
-An Android app that plays the **15-Puzzle** minigame in [Exponential Idle](https://play.google.com/store/apps/details?id=com.conicgames.exponentialidle)
+An Android app that plays the **Arrow Puzzle** and **15-Puzzle** minigames in [Exponential Idle](https://play.google.com/store/apps/details?id=com.conicgames.exponentialidle)
 for you: it reads the board from the screen, solves it, taps the tiles, claims the stars and starts the next board.
 
 > [!WARNING]
@@ -24,28 +24,30 @@ for you: it reads the board from the screen, solves it, taps the tiles, claims t
 
 ## What it does
 
-A small floating bar (the "island") appears over Exponential Idle. Press ▶ and it loops:
+A small floating bar (the "island") appears over Exponential Idle. Open either minigame, press ▶, and it
+loops: read the board, compute the taps, tap, claim the stars (which starts the next board), repeat. It
+recognises which minigame and difficulty is open, including when you switch.
 
-1. reads the board (3×3, 4×4 or 5×5, detected automatically) and the button under it,
-2. computes a short solution,
-3. taps the tiles (one tap slides a whole row or column segment, like in the game),
-4. taps **Great! Claim N stars**, which also starts the next board, and goes again.
+**Which one to run:** the game raises its star rewards as you progress, and the bot reads the real reward
+from the claim button, so the stats screen shows true ★/min. On the test phone (1080×2340, Android 16):
 
-Exponential Idle exposes its puzzle tiles and buttons to Android's accessibility system, so the bot reads
-the numbers directly. That's exact and fast. On Android 11–12, or if a game update changes this, it falls
-back to reading screenshots.
+| Minigame | Reward seen | Taps per board | Time per board | ★/min |
+|---|---|---|---|---|
+| **Arrow Puzzle Expert** | **93–97★** | ~58 | ~0.45 s | **~12,600** |
+| Arrow Puzzle Hard | 52★ | ~13 | | |
+| Arrow Puzzle Easy | 3★ | ~14 | | |
+| 15-Puzzle Hard 5×5 | 22★ | ~87 | ~0.37 s | ~3,500 |
 
-**Hard (5×5) gives the most stars per minute.** The game raises its star rewards as you progress. The bot
-reads the real reward from the claim button, so its ★/min stats are accurate. On the test phone
-(1080×2340, Android 16) a Hard board takes about **0.37 s** once auto-tune settles, about 3,500★/min at 22★
-per board. That breaks down as ~35 ms thinking, ~190 ms tapping, ~35 ms until the game shows "Claim", and
-~115 ms to read the next board.
+### Arrow Puzzle
+Tapping a tile turns it and every touching tile one step clockwise: 90° on Easy (3×3) and Medium (4×4),
+60° on Expert (hex board), and a flip on Hard (hex board, up/down only). So a board is a set of linear
+equations (mod 4, 6 or 2), solved exactly for the fewest taps. The game exposes where the tiles are but not
+which way the arrows point, so the bot takes one screenshot of the board area per board to read them.
 
-| Difficulty | Moves (solver) | Taps with multi-tile slides |
-|---|---|---|
-| Easy 3×3   | 22 (optimal)        | ~18 |
-| Medium 4×4 | 53 (optimal)        | ~38 |
-| **Hard 5×5** | ~127 (near-optimal) | **~87** |
+### 15-Puzzle
+The game exposes every tile's number to Android's accessibility system, so the bot reads the board directly
+(screenshots are a fallback). One tap slides a whole row or column segment, like in the game. Solutions:
+Easy 3×3 ~18 taps (optimal), Medium 4×4 ~38 (optimal moves), Hard 5×5 ~87 (near-optimal).
 
 ## Install
 
@@ -69,7 +71,7 @@ Allow your browser or file manager to install unknown apps. If Play Protect warn
 ## Use it
 
 1. Turning on Do Not Disturb is recommended, so notifications don't interrupt it.
-2. Open Exponential Idle → Stars → Minigames → **15-Puzzle** → pick a difficulty.
+2. Open Exponential Idle → Stars → Minigames → **Arrow Puzzle** or **15-Puzzle** → pick a difficulty.
 3. Press **▶** on the island to start and **■** to stop. Drag the text to move the island; long-press it to open settings.
 4. The first 4×4/5×5 run spends a few seconds building solver tables; after that they are cached.
 5. **Stars per board** (settings screen): leave these at 0 to use the reward the game shows. Type a
@@ -98,17 +100,28 @@ Allow your browser or file manager to install unknown apps. If Play Protect warn
 
 - The app requests **no Android permissions**, including **no internet access**. Nothing it sees leaves the phone.
 - As an Accessibility Service it can:
-  - read Exponential Idle's puzzle: the tile numbers, their positions, and the text of the button under the board;
-  - take screenshots (only used when the puzzle can't be read directly);
+  - read Exponential Idle's puzzle: the tile numbers and positions, the minigame title, and the text of the
+    button under the board;
+  - take screenshots (one of the board area per Arrow Puzzle board, to see the arrows; and for the 15-Puzzle
+    only when it can't be read directly). They're processed in memory and discarded;
   - perform taps;
   - see the list of open windows (their position and which app owns them), for the failsafe. It does **not** read
     the text or contents of other apps' windows.
+- For troubleshooting, a computer connected over USB with debugging enabled can ask the bot to write the game's
+  view tree to the phone's log (`adb shell am broadcast -a io.github.wwalkerrocks.puzzlebot.DUMP_TREE`).
+  Other apps can't trigger this (it requires a permission only the adb shell has).
 - Nothing is stored except settings and stats. The only exception: if it can't read the board in screenshot mode,
   it saves that one screenshot to `Android/data/io.github.wwalkerrocks.puzzlebot/files/debug` for
   troubleshooting. This can be turned off in settings.
 
 ## How it works
 
+- `core/ArrowSolver.kt`: Arrow Puzzle as linear equations over Z₄/Z₆/Z₂ (row reduction with Euclid, since
+  4 and 6 aren't prime). The Expert board has 3,888 solutions for any position, and the bot picks the one with
+  the fewest taps. Per board shape the reduction and the list of "do-nothing" tap combinations are computed
+  once, so each board solves in well under a millisecond.
+- `core/ArrowReader.kt`: which way each chevron points, from the screenshot (its tip is narrow, its ends are
+  wide).
 - `core/TreeBoard.kt`: turns the tile views the game exposes (number and screen bounds) into a board, and reads
   the reward from the claim button. `BotService.readTree()` fetches them in a single request per board.
 - `core/BoardReader.kt` (screenshot fallback): finds the grid from the thin tile-border lines, splits each tile into digit shapes,

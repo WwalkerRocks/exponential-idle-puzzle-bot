@@ -13,15 +13,21 @@ class Settings(context: Context) {
     private fun bool(key: String, def: Boolean) = p.getBoolean(key, def)
     private fun putBool(key: String, v: Boolean) = p.edit().putBoolean(key, v).apply()
 
+    /**
+     * Which minigame the tap speed belongs to: each one is tuned separately, because the game may
+     * handle taps on one puzzle faster than on another. "" = 15-Puzzle, [ARROW] = Arrow Puzzle.
+     */
+    var profile = ""
+
     /** How long each tap holds the finger down. */
     var tapMs: Int
-        get() = int("tapMs", 20)
-        set(v) = putInt("tapMs", v.coerceIn(MIN_TAP, 200))
+        get() = int("${profile}tapMs", if (profile == ARROW) 5 else 20)
+        set(v) = putInt("${profile}tapMs", v.coerceIn(MIN_TAP, 200))
 
     /** Pause between the end of one tap and the start of the next (auto-tuned if [autoSpeed]). */
     var gapMs: Int
-        get() = int("gapMs", 30)
-        set(v) = putInt("gapMs", v.coerceIn(MIN_GAP, MAX_GAP))
+        get() = int("${profile}gapMs", if (profile == ARROW) 10 else 30)
+        set(v) = putInt("${profile}gapMs", v.coerceIn(MIN_GAP, MAX_GAP))
 
     /** Taps sent to Android in one gesture (1 = one at a time; higher is smoother and faster). */
     var tapsPerGesture: Int
@@ -64,41 +70,55 @@ class Settings(context: Context) {
         get() = int("islandY", -1)
         set(v) = putInt("islandY", v)
 
-    // ---- statistics per board size
+    // ---- statistics per puzzle and difficulty (see [BOARDS] for the keys)
 
-    fun games(n: Int) = int("games$n", 0)
-    fun botMs(n: Int) = p.getLong("ms$n", 0L)
-    fun taps(n: Int) = p.getLong("taps$n", 0L)
-    fun stars(n: Int) = p.getLong("stars$n", 0L)
+    fun games(key: String) = int("games$key", 0)
+    fun botMs(key: String) = p.getLong("ms$key", 0L)
+    fun taps(key: String) = p.getLong("taps$key", 0L)
+    fun stars(key: String) = p.getLong("stars$key", 0L)
 
     /** Records one finished board: [ms] = bot time spent on it, including claiming/starting. */
-    fun recordGame(n: Int, ms: Long, taps: Int, stars: Int) {
+    fun recordGame(key: String, ms: Long, taps: Int, stars: Int) {
         p.edit()
-            .putInt("games$n", games(n) + 1)
-            .putLong("ms$n", botMs(n) + ms)
-            .putLong("taps$n", taps(n) + taps)
-            .putLong("stars$n", stars(n) + stars)
+            .putInt("games$key", games(key) + 1)
+            .putLong("ms$key", botMs(key) + ms)
+            .putLong("taps$key", taps(key) + taps)
+            .putLong("stars$key", stars(key) + stars)
             .apply()
     }
 
-    fun starsPerMinute(n: Int): Double {
-        val ms = botMs(n)
-        return if (ms <= 0) 0.0 else stars(n) * 60_000.0 / ms
+    fun starsPerMinute(key: String): Double {
+        val ms = botMs(key)
+        return if (ms <= 0) 0.0 else stars(key) * 60_000.0 / ms
     }
 
     /** Stars per board typed in by the user; 0 = use what the game shows on its claim button. */
-    fun manualStars(n: Int) = int("manualStars$n", 0)
-    fun setManualStars(n: Int, v: Int) = putInt("manualStars$n", v.coerceIn(0, 1_000_000_000))
+    fun manualStars(key: String) = int("manualStars$key", 0)
+    fun setManualStars(key: String, v: Int) = putInt("manualStars$key", v.coerceIn(0, 1_000_000_000))
 
     /** Last reward read from the game's claim button (0 = never seen). */
-    fun lastReward(n: Int) = int("lastReward$n", 0)
-    fun setLastReward(n: Int, v: Int) { if (v != lastReward(n)) putInt("lastReward$n", v) }
+    fun lastReward(key: String) = int("lastReward$key", 0)
+    fun setLastReward(key: String, v: Int) { if (v != lastReward(key)) putInt("lastReward$key", v) }
+
+    /** Stars counted for one board: the manual setting if set, else what the game showed, else a guess. */
+    fun rewardFor(key: String, fromGame: Int?): Int {
+        if (fromGame != null) setLastReward(key, fromGame)
+        val manual = manualStars(key)
+        return when {
+            manual > 0 -> manual
+            fromGame != null -> fromGame
+            else -> BOARDS.firstOrNull { it.key == key }?.baseStars ?: 0
+        }
+    }
 
     fun resetStats() {
         val e = p.edit()
-        for (n in 3..5) e.remove("games$n").remove("ms$n").remove("moves$n").remove("taps$n").remove("stars$n")
+        for (b in BOARDS) e.remove("games${b.key}").remove("ms${b.key}").remove("moves${b.key}").remove("taps${b.key}").remove("stars${b.key}")
         e.apply()
     }
+
+    /** A puzzle + difficulty the bot keeps stats for. */
+    class Board(val key: String, val label: String, val baseStars: Int)
 
     companion object {
         const val MIN_GAP = 1 // 0 would make one tap start as the previous ends (a two-finger touch)
@@ -106,5 +126,16 @@ class Settings(context: Context) {
         const val MIN_TAP = 1
         const val MIN_BUTTON_WAIT = 150
         const val MIN_SETTLE = 50
+        const val ARROW = "arrow."
+
+        val BOARDS = listOf(
+            Board("3", "15-Puzzle Easy 3×3", Solvers.stars(3)),
+            Board("4", "15-Puzzle Medium 4×4", Solvers.stars(4)),
+            Board("5", "15-Puzzle Hard 5×5", Solvers.stars(5)),
+            Board("a3", "Arrow Easy 3×3", 0),
+            Board("a4", "Arrow Medium 4×4", 0),
+            Board("h2", "Arrow Hard (hex, up/down)", 0),
+            Board("h6", "Arrow Expert (hex, 6 ways)", 0),
+        )
     }
 }

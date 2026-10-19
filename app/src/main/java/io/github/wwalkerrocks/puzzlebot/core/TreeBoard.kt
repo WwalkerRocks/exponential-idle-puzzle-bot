@@ -37,6 +37,8 @@ class TreeBoard(val n: Int, val board: IntArray, val grid: Grid, val aligned: Bo
                 if (board[i] != 0) aligned = false else board[i] = t.value
             }
             if (aligned && !Puzzle.isPermutation(board) && tiles.size == n * n - 1) aligned = false
+            // A full board (no empty cell) is only a 15-Puzzle once solved; otherwise it's another game.
+            if (tiles.size == n * n && aligned && !board.withIndex().all { it.value == it.index + 1 }) return null
             val grid = Grid(n, left.toFloat(), top.toFloat(), right.toFloat(), bottom.toFloat())
             return TreeBoard(n, board, grid, aligned)
         }
