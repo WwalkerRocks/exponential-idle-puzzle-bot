@@ -21,12 +21,12 @@ class Settings(context: Context) {
 
     /** How long each tap holds the finger down. */
     var tapMs: Int
-        get() = int("${profile}tapMs", if (profile == ARROW) 5 else 20)
+        get() = int("${profile}tapMs", when (profile) { ARROW, TORUS -> 4; else -> 20 })
         set(v) = putInt("${profile}tapMs", v.coerceIn(MIN_TAP, 200))
 
     /** Pause between the end of one tap and the start of the next (auto-tuned if [autoSpeed]). */
     var gapMs: Int
-        get() = int("${profile}gapMs", if (profile == ARROW) 10 else 30)
+        get() = int("${profile}gapMs", when (profile) { ARROW, TORUS -> 4; else -> 30 })
         set(v) = putInt("${profile}gapMs", v.coerceIn(MIN_GAP, MAX_GAP))
 
     /** Taps sent to Android in one gesture (1 = one at a time; higher is smoother and faster). */
@@ -127,6 +127,7 @@ class Settings(context: Context) {
         const val MIN_BUTTON_WAIT = 150
         const val MIN_SETTLE = 50
         const val ARROW = "arrow."
+        const val TORUS = "torus." // for the Torus Puzzle, "tap length" is how long each swipe takes
 
         val BOARDS = listOf(
             Board("3", "15-Puzzle Easy 3×3", Solvers.stars(3)),
@@ -136,6 +137,10 @@ class Settings(context: Context) {
             Board("a4", "Arrow Medium 4×4", 0),
             Board("h2", "Arrow Hard (hex, up/down)", 0),
             Board("h6", "Arrow Expert (hex, 6 ways)", 0),
+            Board("t3", "Torus 3×3", 0),
+            Board("t4", "Torus 4×4", 0),
+            Board("t5", "Torus 5×5", 0),
+            Board("t6", "Torus 6×6", 0),
         )
     }
 }

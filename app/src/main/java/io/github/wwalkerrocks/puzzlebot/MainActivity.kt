@@ -47,7 +47,7 @@ class MainActivity : Activity() {
         setContentView(ScrollView(this).apply { addView(col) })
 
         col.addView(text("Puzzle Bot for Exponential Idle", 22f, bold = true))
-        col.addView(text("Solves the 15-Puzzle and Arrow Puzzle minigames for you: it reads the board from the screen, " +
+        col.addView(text("Solves the Arrow Puzzle, 15-Puzzle and Torus Puzzle minigames for you: it reads the board from the screen, " +
             "finds a short solution and taps the tiles, then claims the stars and starts the next board.", 14f))
 
         col.addView(header("1. Turn on the service"))
@@ -63,10 +63,10 @@ class MainActivity : Activity() {
         })
 
         col.addView(header("2. Use it"))
-        col.addView(text("• Open Exponential Idle → Stars → Minigames → 15-Puzzle or Arrow Puzzle and pick a difficulty.\n" +
+        col.addView(text("• Open Exponential Idle → Stars → Minigames → any of the three puzzles and pick a difficulty.\n" +
             "• A small bar appears near the top. Press ▶ to start, ■ to stop. Drag the text to move it; " +
             "long-press the text to come back here.\n" +
-            "• Every difficulty of both puzzles works, and it notices when you switch. Compare ★/min in the " +
+            "• Every difficulty of all three puzzles works, and it notices when you switch. Compare ★/min in the " +
             "stats below to pick the best one (Arrow Expert pays the most per board).\n" +
             "• It pauses if something covers the puzzle and stops if it can't see a puzzle.\n" +
             "• Tip: turn on Do Not Disturb so notifications don't cover the board.", 14f))
@@ -136,7 +136,9 @@ class MainActivity : Activity() {
             settings.profile = ""
             append("15-Puzzle speed: tap ${settings.tapMs} ms + pause ${settings.gapMs} ms\n")
             settings.profile = Settings.ARROW
-            append("Arrow Puzzle speed: tap ${settings.tapMs} ms + pause ${settings.gapMs} ms")
+            append("Arrow Puzzle speed: tap ${settings.tapMs} ms + pause ${settings.gapMs} ms\n")
+            settings.profile = Settings.TORUS
+            append("Torus Puzzle speed: swipe ${settings.tapMs} ms + pause ${settings.gapMs} ms")
             settings.profile = ""
         }
     }

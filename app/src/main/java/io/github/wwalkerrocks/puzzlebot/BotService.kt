@@ -42,6 +42,7 @@ import io.github.wwalkerrocks.puzzlebot.core.Puzzle
 import io.github.wwalkerrocks.puzzlebot.core.Reading
 import io.github.wwalkerrocks.puzzlebot.core.Solvers
 import io.github.wwalkerrocks.puzzlebot.core.Taps
+import io.github.wwalkerrocks.puzzlebot.core.TorusSolver
 import io.github.wwalkerrocks.puzzlebot.core.TreeBoard
 import io.github.wwalkerrocks.puzzlebot.core.TreeTile
 import java.io.File
@@ -118,6 +119,7 @@ class BotService : AccessibilityService() {
         PatternDb.cacheDir = File(filesDir, "tables").apply { mkdirs() }
         Thread({
             for (n in 3..5) try { Solvers.prepare(n) } catch (e: Throwable) { Log.e(TAG, "prepare $n", e) }
+            try { TorusSolver.solve(IntArray(9) { it + 1 }, 3) } catch (e: Throwable) { Log.e(TAG, "torus table", e) }
             if (!running) main.post { island?.setText("Puzzle Bot ready — open a 15-Puzzle or Arrow Puzzle") }
         }, "solver-warmup").apply { priority = Thread.MIN_PRIORITY; start() }
         if (!settings.onlyOverGame) showIsland()
@@ -362,7 +364,7 @@ class BotService : AccessibilityService() {
 
     private fun looksLikeBoard(node: AccessibilityNodeInfo, r: Rect): Boolean {
         val c = node.childCount
-        if (c < 8 || c > 25) return false
+        if (c < 8 || c > 64) return false
         node.getBoundsInScreen(r)
         val w = r.width()
         return w >= resources.displayMetrics.widthPixels * 0.4f && kotlin.math.abs(r.height() - w) <= w * 0.05f
@@ -450,6 +452,10 @@ class BotService : AccessibilityService() {
         return pkg
     }
 
+    /** True while running the Torus Puzzle: boards have no empty cell. */
+    @Volatile
+    private var torusBoards = false
+
     private fun parseBoard(boardNode: AccessibilityNodeInfo): TreeBoard? {
         val r = Rect()
         val tiles = ArrayList<TreeTile>(boardNode.childCount)
@@ -461,7 +467,7 @@ class BotService : AccessibilityService() {
             tiles.add(TreeTile(r.left, r.top, r.right, r.bottom, v))
         }
         boardNode.getBoundsInScreen(r)
-        return TreeBoard.from(r.left, r.top, r.right, r.bottom, tiles)
+        return TreeBoard.from(r.left, r.top, r.right, r.bottom, tiles, torusBoards)
     }
 
     /** Re-reads only the board (one request to the game), falling back to a full read. */
@@ -616,6 +622,10 @@ class BotService : AccessibilityService() {
         // Other languages: recognise the board itself.
         if (readArrowLayout() != null) return Minigame.ARROW
         if (readTree() != null) return Minigame.FIFTEEN
+        torusBoards = true
+        val full = readTree()
+        torusBoards = false
+        if (full != null) return Minigame.TORUS
         return Minigame.NONE
     }
 
@@ -636,7 +646,10 @@ class BotService : AccessibilityService() {
                     noneSince = -1
                     if (!arrowLoop(gen) && alive()) { stopBot("Stopped: couldn't read the Arrow Puzzle"); return }
                 }
-                Minigame.TORUS -> { stopBot("Torus Puzzle isn't supported yet"); return }
+                Minigame.TORUS -> {
+                    noneSince = -1
+                    if (!torusLoop(gen) && alive()) { stopBot("Stopped: couldn't read the Torus Puzzle"); return }
+                }
                 Minigame.NONE -> {
                     if (blocked(emptyList()) != null) {
                         if (!waitUntilClear(emptyList(), ::alive)) { if (alive()) stopBot("Stopped: paused for more than ${PAUSE_LIMIT_MS / 60_000} minutes"); return }
@@ -934,6 +947,7 @@ class BotService : AccessibilityService() {
     private fun treeLoop(gen: Int): Boolean {
         fun alive() = running && generation == gen
         settings.profile = ""
+        torusBoards = false
         var sawBoard = false
         val fresh = 0
         val waitSolved = 1
@@ -1331,6 +1345,164 @@ class BotService : AccessibilityService() {
         return true
     }
 
+    // ------------------------------------------------------------------ Torus Puzzle
+
+    /** Swipe start and end points that shift a row/column by [m]'s amount without leaving the board. */
+    private fun swipeFor(grid: Grid, m: TorusSolver.Move): Pair<PointF, PointF> {
+        val n = grid.n
+        val from = if (m.shift > 0) 0 else n - 1
+        val to = from + m.shift
+        return if (m.row) {
+            PointF(grid.centerX(m.index * n + from), grid.centerY(m.index * n)) to PointF(grid.centerX(m.index * n + to), grid.centerY(m.index * n))
+        } else {
+            PointF(grid.centerX(m.index), grid.centerY(from * n + m.index)) to PointF(grid.centerX(m.index), grid.centerY(to * n + m.index))
+        }
+    }
+
+    /** Swipes in short gestures, checking the screen before each (like [tapPoints]). */
+    private fun swipe(grid: Grid, moves: List<TorusSolver.Move>, alive: () -> Boolean): TapResult {
+        val dur = settings.tapMs.toLong()
+        val gap = settings.gapMs.toLong()
+        val per = minOf(settings.tapsPerGesture, GestureDescription.getMaxStrokeCount(), maxOf(1L, MAX_BATCH_MS / maxOf(1L, dur + gap)).toInt())
+        var i = 0
+        while (i < moves.size) {
+            if (!alive()) return TapResult.FAILED
+            val end = min(moves.size, i + per)
+            val strokes = moves.subList(i, end).map { swipeFor(grid, it) }
+            if (blocked(strokes.flatMap { listOf(it.first, it.second) }) != null) return TapResult.PAUSED
+            if (!dispatchStrokes(strokes, dur, gap)) {
+                if (safetyCancel) { safetyCancel = false; return TapResult.PAUSED }
+                return TapResult.FAILED
+            }
+            i = end
+            if (i < moves.size) sleepMs(gap)
+        }
+        return TapResult.DONE
+    }
+
+    /**
+     * Torus Puzzle loop: read the numbers from the game's views, solve, swipe, wait for "Claim",
+     * claim (which starts the next board), repeat. Returns false if no board could be read.
+     */
+    private fun torusLoop(gen: Int): Boolean {
+        fun alive() = running && generation == gen
+        settings.profile = Settings.TORUS
+        torusBoards = true
+        treeParent = null
+        resetTuning()
+        val fresh = 0
+        val waitSolved = 1
+        val waitNew = 2
+        var phase = fresh
+        var phaseStart = 0L
+        var lastRecord = SystemClock.uptimeMillis()
+        var lastGuard = 0L
+        var gameSwipes = 0
+        var key = ""
+        var buttonTaps = 0
+        var missingSince = -1L
+        var sawBoard = false
+        var lastGrid: Grid? = null
+        var lastFrom: IntArray? = null
+        var noEffect = 0
+        var checkedIsland = false
+        try {
+            status("Starting the Torus Puzzle…")
+            while (alive()) {
+                if (SystemClock.uptimeMillis() - lastGuard > 250) {
+                    lastGuard = SystemClock.uptimeMillis()
+                    val guard = lastGrid?.let { guardPoints(it) } ?: emptyList()
+                    if (blocked(guard) != null) {
+                        if (!waitUntilClear(guard, ::alive)) {
+                            if (alive()) stopBot("Stopped: paused for more than ${PAUSE_LIMIT_MS / 60_000} minutes")
+                            return true
+                        }
+                        status("Resuming…")
+                        phase = fresh; treeParent = null
+                        continue
+                    }
+                }
+                val now = SystemClock.uptimeMillis()
+                if (phase == waitSolved || phase == waitNew) {
+                    val reward = TreeBoard.reward(buttonText())
+                    if (phase == waitSolved && reward != null) {
+                        val stars = settings.rewardFor(key, reward)
+                        settings.recordGame(key, now - lastRecord, gameSwipes, stars)
+                        lastRecord = now
+                        sessionGames++; sessionStars += stars; gameSwipes = 0
+                        tuneFaster()
+                        status("Torus ${key.drop(1)}×${key.drop(1)} solved — claiming $reward★" + sessionSummary())
+                        val at = treeButtonAt ?: lastGrid?.let { PointF(it.buttonX(), it.buttonY()) } ?: continue
+                        if (blocked(listOf(at)) != null) { lastGuard = 0; phase = fresh; continue }
+                        if (buttonTaps >= 3) { stopBot("Stopped: the button didn't start a new board"); return true }
+                        if (!tap(at.x, at.y)) { if (safetyCancel) { safetyCancel = false; phase = fresh; continue }; stopBot("Stopped: Android rejected the tap"); return true }
+                        buttonTaps++
+                        phase = waitNew; phaseStart = SystemClock.uptimeMillis()
+                        continue
+                    }
+                    if (phase == waitNew) {
+                        if (reward != null && now - phaseStart < NEW_GAME_WAIT_MS) { sleepMs(3); continue }
+                        if (reward == null) buttonTaps = 0
+                    } else if (now - phaseStart < BOARD_CHECK_MS) { sleepMs(3); continue }
+                }
+
+                val v = readBoardFast()
+                val t = SystemClock.uptimeMillis()
+                if (v == null) {
+                    if (missingSince < 0) missingSince = t
+                    if (t - missingSince > 1500) return sawBoard
+                    sleepMs(30); continue
+                }
+                missingSince = -1
+                sawBoard = true
+                val b = v.board
+                if (!b.aligned) { sleepMs(5); continue } // rows still sliding
+                val n = b.n
+                lastGrid = b.grid
+                if (!checkedIsland) { checkedIsland = true; keepIslandClear(b.grid) }
+                key = "t$n"
+                if (b.solved) {
+                    // Solved but no "Claim" seen yet (or a fresh start on a solved board): look at the button again.
+                    if (phase == waitNew && now - phaseStart < NEW_GAME_WAIT_MS) { sleepMs(5); continue }
+                    phase = waitSolved; phaseStart = SystemClock.uptimeMillis() - BOARD_CHECK_MS
+                    if (TreeBoard.reward(buttonText()) == null && buttonTaps < 3) {
+                        val at = treeButtonAt ?: continue
+                        if (!tap(at.x, at.y)) continue
+                        buttonTaps++; phase = waitNew; phaseStart = SystemClock.uptimeMillis()
+                    }
+                    continue
+                }
+                if (phase == waitSolved) {
+                    // Swipes done but not solved: some were lost. Solve again from here.
+                    sessionMissed++
+                    tuneSlower()
+                }
+                if (lastFrom != null && lastFrom.contentEquals(b.board)) {
+                    if (++noEffect >= 3) { stopBot("Stopped: swipes don't move the tiles"); return true }
+                } else noEffect = 0
+                lastFrom = b.board
+                val t0 = SystemClock.uptimeMillis()
+                val moves = TorusSolver.solve(b.board, n)
+                if (moves == null) { Log.i(TAG, "torus: unsolvable read, looking again"); treeParent = null; sleepMs(50); continue }
+                val solveMs = SystemClock.uptimeMillis() - t0
+                status("Torus ${n}×$n: ${moves.size} swipes, ${settings.tapMs}+${settings.gapMs}ms" + sessionSummary())
+                val t1 = SystemClock.uptimeMillis()
+                when (swipe(b.grid, moves, ::alive)) {
+                    TapResult.PAUSED -> { phase = fresh; lastGuard = 0; lastFrom = null; continue }
+                    TapResult.FAILED -> { if (alive()) stopBot("Stopped: Android cancelled the swipes"); return true }
+                    TapResult.DONE -> {}
+                }
+                Log.i(TAG, "torus t$n: ${moves.size} swipes in ${SystemClock.uptimeMillis() - t1}ms (solve ${solveMs}ms), swipe ${settings.tapMs}ms gap ${settings.gapMs}ms")
+                gameSwipes += moves.size
+                phase = waitSolved
+                phaseStart = SystemClock.uptimeMillis()
+            }
+            return true
+        } finally {
+            torusBoards = false
+        }
+    }
+
     private fun boardName(key: String) = when (key) { "a3" -> "Easy"; "a4" -> "Medium"; "h2" -> "Hard"; "h6" -> "Expert"; else -> key }
 
     /** If the island sits over the board or the button, move it to the top so taps don't hit it. */
@@ -1374,11 +1546,19 @@ class BotService : AccessibilityService() {
     }
 
     /** Sends the taps as one gesture (one stroke per tap, spaced in time) and waits for it. */
-    private fun dispatch(points: List<PointF>, tapMs: Long, gapMs: Long): Boolean {
+    private fun dispatch(points: List<PointF>, tapMs: Long, gapMs: Long): Boolean =
+        dispatchStrokes(points.map { it to it }, tapMs, gapMs)
+
+    /** One gesture made of strokes (start -> end, a tap when equal), spaced in time. */
+    private fun dispatchStrokes(strokes: List<Pair<PointF, PointF>>, durMs: Long, gapMs: Long): Boolean {
+        val points = strokes.flatMap { listOf(it.first, it.second) }
         val b = GestureDescription.Builder()
-        for ((j, p) in points.withIndex()) {
-            val path = Path().apply { moveTo(p.x, p.y) }
-            b.addStroke(GestureDescription.StrokeDescription(path, j * (tapMs + gapMs), tapMs))
+        for ((j, st) in strokes.withIndex()) {
+            val path = Path().apply {
+                moveTo(st.first.x, st.first.y)
+                if (st.first.x != st.second.x || st.first.y != st.second.y) lineTo(st.second.x, st.second.y)
+            }
+            b.addStroke(GestureDescription.StrokeDescription(path, j * (durMs + gapMs), durMs))
         }
         val latch = CountDownLatch(1)
         var ok = false

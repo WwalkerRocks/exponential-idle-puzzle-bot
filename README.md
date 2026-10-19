@@ -1,6 +1,6 @@
 # Puzzle Bot for Exponential Idle
 
-An Android app that plays the **Arrow Puzzle** and **15-Puzzle** minigames in [Exponential Idle](https://play.google.com/store/apps/details?id=com.conicgames.exponentialidle)
+An Android app that plays the **Arrow Puzzle**, **Torus Puzzle** and **15-Puzzle** minigames in [Exponential Idle](https://play.google.com/store/apps/details?id=com.conicgames.exponentialidle)
 for you: it reads the board from the screen, solves it, taps the tiles, claims the stars and starts the next board.
 
 > [!WARNING]
@@ -24,25 +24,34 @@ for you: it reads the board from the screen, solves it, taps the tiles, claims t
 
 ## What it does
 
-A small floating bar (the "island") appears over Exponential Idle. Open either minigame, press ▶, and it
+A small floating bar (the "island") appears over Exponential Idle. Open any of the three minigames, press ▶, and it
 loops: read the board, compute the taps, tap, claim the stars (which starts the next board), repeat. It
 recognises which minigame and difficulty is open, including when you switch.
 
 **Which one to run:** the game raises its star rewards as you progress, and the bot reads the real reward
 from the claim button, so the stats screen shows true ★/min. On the test phone (1080×2340, Android 16):
 
-| Minigame | Reward seen | Taps per board | Time per board | ★/min |
+| Minigame | Reward seen | Taps/swipes per board | Time per board | ★/min |
 |---|---|---|---|---|
-| **Arrow Puzzle Expert** | **93–97★** | ~58 | ~0.45 s | **~12,600** |
-| Arrow Puzzle Hard | 52★ | ~13 | | |
-| Arrow Puzzle Easy | 3★ | ~14 | | |
-| 15-Puzzle Hard 5×5 | 22★ | ~87 | ~0.37 s | ~3,500 |
+| **Arrow Puzzle Expert** | **93–97★** | ~58 taps | ~0.45 s | **~12,600** |
+| Torus Puzzle Hard 6×6 | 56★ | ~115 swipes | ~0.40 s | ~8,400 |
+| 15-Puzzle Hard 5×5 | 22★ | ~87 taps | ~0.37 s | ~3,500 |
+| Arrow Puzzle Hard | 52★ | ~13 taps | | |
+| Arrow Puzzle Easy / Torus Easy | 3★ | ~14 taps / ~6 swipes | | |
 
 ### Arrow Puzzle
 Tapping a tile turns it and every touching tile one step clockwise: 90° on Easy (3×3) and Medium (4×4),
 60° on Expert (hex board), and a flip on Hard (hex board, up/down only). So a board is a set of linear
 equations (mod 4, 6 or 2), solved exactly for the fewest taps. The game exposes where the tiles are but not
 which way the arrows point, so the bot takes one screenshot of the board area per board to read them.
+
+### Torus Puzzle
+A swipe shifts a whole row or column by any number of cells, wrapping around (also known as Loopover). The
+game exposes the numbers, so the board is read directly. 3×3 is solved optimally (fewest swipes) from a
+table of all 181,440 positions. Bigger boards are solved row by row: each tile is put in place with a
+4-swipe commutator (row move, column move, then both undone) that swaps exactly three tiles and leaves
+finished rows untouched. The last two rows are filled column by column the same way. 6×6 takes ~115
+swipes, and the game accepts them as fast as 1 ms each.
 
 ### 15-Puzzle
 The game exposes every tile's number to Android's accessibility system, so the bot reads the board directly
@@ -71,7 +80,7 @@ Allow your browser or file manager to install unknown apps. If Play Protect warn
 ## Use it
 
 1. Turning on Do Not Disturb is recommended, so notifications don't interrupt it.
-2. Open Exponential Idle → Stars → Minigames → **Arrow Puzzle** or **15-Puzzle** → pick a difficulty.
+2. Open Exponential Idle → Stars → Minigames → **Arrow Puzzle**, **Torus Puzzle** or **15-Puzzle** → pick a difficulty.
 3. Press **▶** on the island to start and **■** to stop. Drag the text to move the island; long-press it to open settings.
 4. The first 4×4/5×5 run spends a few seconds building solver tables; after that they are cached.
 5. **Stars per board** (settings screen): leave these at 0 to use the reward the game shows. Type a
@@ -122,6 +131,8 @@ Allow your browser or file manager to install unknown apps. If Play Protect warn
   once, so each board solves in well under a millisecond.
 - `core/ArrowReader.kt`: which way each chevron points, from the screenshot (its tip is narrow, its ends are
   wide).
+- `core/TorusSolver.kt`: Torus Puzzle. Optimal table for 3×3, and commutator-based placement for larger
+  boards (with a parity fix on even sizes so the last two tiles come out right).
 - `core/TreeBoard.kt`: turns the tile views the game exposes (number and screen bounds) into a board, and reads
   the reward from the claim button. `BotService.readTree()` fetches them in a single request per board.
 - `core/BoardReader.kt` (screenshot fallback): finds the grid from the thin tile-border lines, splits each tile into digit shapes,

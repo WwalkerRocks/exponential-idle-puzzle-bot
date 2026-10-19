@@ -15,14 +15,16 @@ class TreeBoard(val n: Int, val board: IntArray, val grid: Grid, val aligned: Bo
 
     companion object {
         /** Null if this doesn't look like a 3x3/4x4/5x5 board. */
-        fun from(left: Int, top: Int, right: Int, bottom: Int, tiles: List<TreeTile>): TreeBoard? {
+        /** [torus]: every cell has a tile (no empty cell) and boards go up to 8×8. */
+        fun from(left: Int, top: Int, right: Int, bottom: Int, tiles: List<TreeTile>, torus: Boolean = false): TreeBoard? {
             if (tiles.size < 8) return null
             val size = (right - left).toFloat()
             if (size <= 0 || abs((bottom - top) - size) > size * 0.05f) return null
             val tileW = tiles.map { it.right - it.left }.sorted()[tiles.size / 2]
             if (tileW <= 0) return null
             val n = (size / tileW).roundToInt()
-            if (n !in 3..5 || tiles.size !in n * n - 1..n * n) return null
+            if (torus) { if (n !in 3..8 || tiles.size != n * n) return null }
+            else if (n !in 3..5 || tiles.size !in n * n - 1..n * n) return null
             val cell = size / n
             val board = IntArray(n * n)
             var aligned = true
@@ -38,7 +40,7 @@ class TreeBoard(val n: Int, val board: IntArray, val grid: Grid, val aligned: Bo
             }
             if (aligned && !Puzzle.isPermutation(board) && tiles.size == n * n - 1) aligned = false
             // A full board (no empty cell) is only a 15-Puzzle once solved; otherwise it's another game.
-            if (tiles.size == n * n && aligned && !board.withIndex().all { it.value == it.index + 1 }) return null
+            if (!torus && tiles.size == n * n && aligned && !board.withIndex().all { it.value == it.index + 1 }) return null
             val grid = Grid(n, left.toFloat(), top.toFloat(), right.toFloat(), bottom.toFloat())
             return TreeBoard(n, board, grid, aligned)
         }
