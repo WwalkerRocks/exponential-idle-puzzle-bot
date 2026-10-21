@@ -28,16 +28,19 @@ A small floating bar (the "island") appears over Exponential Idle. Open any of t
 loops: read the board, compute the taps, tap, claim the stars (which starts the next board), repeat. It
 recognises which minigame and difficulty is open, including when you switch.
 
-**Which one to run:** the game raises its star rewards as you progress, and the bot reads the real reward
-from the claim button, so the stats screen shows true ★/min. On the test phone (1080×2340, Android 16):
+**Which one to run:** star rewards depend on how far you are in the game, so they differ from player to
+player. The bot reads the real reward from the claim button, and the app's stats screen shows your own ★/min
+for each puzzle and difficulty: run a few for a minute each and compare. Speed on the test phone
+(1080×2340, Android 16):
 
-| Minigame | Reward seen | Taps/swipes per board | Time per board | ★/min |
-|---|---|---|---|---|
-| **Arrow Puzzle Expert** | **93–97★** | ~58 taps | ~0.45 s | **~12,600** |
-| Torus Puzzle Hard 6×6 | 56★ | ~115 swipes | ~0.40 s | ~8,400 |
-| 15-Puzzle Hard 5×5 | 22★ | ~87 taps | ~0.37 s | ~3,500 |
-| Arrow Puzzle Hard | 52★ | ~13 taps | | |
-| Arrow Puzzle Easy / Torus Easy | 3★ | ~14 taps / ~6 swipes | | |
+| Minigame | Taps/swipes per board | Time per board |
+|---|---|---|
+| Arrow Puzzle Expert (hex) | ~58 taps | ~0.45 s |
+| Arrow Puzzle Hard (hex) | ~13 taps | — |
+| Arrow Puzzle Easy 3×3 | ~14 taps | — |
+| Torus Puzzle Hard 6×6 | ~115 swipes | ~0.40 s |
+| Torus Puzzle Easy 3×3 | ~6 swipes | — |
+| 15-Puzzle Hard 5×5 | ~87 taps | ~0.37 s |
 
 ### Arrow Puzzle
 Tapping a tile turns it and every touching tile one step clockwise: 90° on Easy (3×3) and Medium (4×4),

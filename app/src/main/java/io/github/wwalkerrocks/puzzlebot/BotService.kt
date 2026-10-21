@@ -120,7 +120,7 @@ class BotService : AccessibilityService() {
         Thread({
             for (n in 3..5) try { Solvers.prepare(n) } catch (e: Throwable) { Log.e(TAG, "prepare $n", e) }
             try { TorusSolver.solve(IntArray(9) { it + 1 }, 3) } catch (e: Throwable) { Log.e(TAG, "torus table", e) }
-            if (!running) main.post { island?.setText("Puzzle Bot ready — open a 15-Puzzle or Arrow Puzzle") }
+            if (!running) main.post { island?.setText("Puzzle Bot ready — open an Arrow, Torus or 15-Puzzle") }
         }, "solver-warmup").apply { priority = Thread.MIN_PRIORITY; start() }
         if (!settings.onlyOverGame) showIsland()
         main.post(refreshIsland)
@@ -247,7 +247,7 @@ class BotService : AccessibilityService() {
             text.textSize = 12.5f
             text.maxWidth = dp(250f)
             text.maxLines = 2
-            text.text = if (Solvers.isReady(5)) "Puzzle Bot ready — open a 15-Puzzle" else "Puzzle Bot — preparing solver…"
+            text.text = if (Solvers.isReady(5)) "Puzzle Bot ready — open an Arrow, Torus or 15-Puzzle" else "Puzzle Bot — preparing solver…"
             root.addView(text, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT))
 
             button.gravity = Gravity.CENTER
@@ -1186,14 +1186,22 @@ class BotService : AccessibilityService() {
         var prevState: IntArray? = null
         val prepared = HashMap<Int, ArrowSolver.Prepared>() // per modulus, for the current layout
         var preparedFor: ArrowLayout? = null
-        // A new board's arrows animate into place. Wait this long before the first screenshot:
-        // it grows when that screenshot comes back unclear (a retry costs ~0.34 s, Android's
-        // screenshot spacing) and shrinks slowly otherwise.
-        var newBoardWait = 40L
+        // The new board is drawn a few frames after the button flips back to "I Give Up!"; a
+        // screenshot taken before that still shows the old (all-up) board, and the retry has to
+        // wait for Android's screenshot spacing (~0.34 s, a visible stall). So after a look that
+        // came too early, wait past that delay from then on, and creep back down only on looks
+        // that really tested the wait (not ones the screenshot spacing held back anyway).
+        var newBoardWait = 60.0
         var newBoardAt = -1L
         var newBoardCpu = 0L
         var firstLook = false
         var checkedIsland = false
+        var allUpNoClaim = 0
+        // Per-board timing, logged when a board is slow so stalls can be traced.
+        var claimAt = -1L
+        var looks = 0
+        var tapsStart = 0L
+        var tapsEnd = 0L
         treeParent = null
 
         fun guard(): List<PointF> = layout.tiles.map { PointF((it[0] + it[2]) / 2f, (it[1] + it[3]) / 2f) } +
@@ -1211,11 +1219,17 @@ class BotService : AccessibilityService() {
             buttonTaps++
             phase = waitNew
             phaseStart = SystemClock.uptimeMillis()
+            if (buttonTaps == 1) { claimAt = phaseStart; looks = 0 }
             return true
         }
 
         fun finish(reward: Int?) {
             val now = SystemClock.uptimeMillis()
+            if (claimAt > 0 && now - claimAt > 900) {
+                Log.i(TAG, "slow arrow board ${now - claimAt}ms: claim→new board ${newBoardAt - claimAt}ms, " +
+                    "new board→taps ${tapsStart - newBoardAt}ms ($looks screenshots), taps ${tapsEnd - tapsStart}ms, " +
+                    "taps→Claim ${now - tapsEnd}ms")
+            }
             val stars = settings.rewardFor(key, reward)
             settings.recordGame(key, now - lastRecord, gameTaps, stars)
             lastRecord = now
@@ -1263,7 +1277,7 @@ class BotService : AccessibilityService() {
                     newBoardAt = SystemClock.uptimeMillis()
                     newBoardCpu = SystemClock.currentThreadTimeMillis()
                     firstLook = true
-                    sleepMs(newBoardWait)
+                    sleepMs(newBoardWait.toLong())
                 }
             }
 
@@ -1273,13 +1287,17 @@ class BotService : AccessibilityService() {
             val shotCpu = SystemClock.currentThreadTimeMillis()
             val img = capture(area) ?: run { sleepMs(100); null } ?: continue
             val shotDone = SystemClock.uptimeMillis()
+            looks++
+            // When the screenshot was really taken, counted from the button flip.
+            val lookDelay = lastShot - newBoardAt
             if (!checkedIsland) { checkedIsland = true; keepIslandClear(Grid(1, layout.tiles.minOf { it[0] }.toFloat(), layout.tiles.minOf { it[1] }.toFloat(), layout.tiles.maxOf { it[2] }.toFloat(), layout.tiles.maxOf { it[3] }.toFloat())) }
             val dirs = ArrowReader.read(img, layout.tiles, if (layout.hex) 6 else 4)
             if (dirs == null) {
                 // Arrows still turning, or something on top: look again shortly.
                 if (firstLook) {
-                    Log.i(TAG, "arrows unclear ${shotAt - newBoardAt}ms after the new board; waiting ${newBoardWait}ms -> ${minOf(300L, newBoardWait + 20)}ms")
-                    newBoardWait = minOf(300L, newBoardWait + 20)
+                    val next = minOf(300.0, maxOf(newBoardWait, lookDelay + 15.0))
+                    Log.i(TAG, "arrows unclear ${lookDelay}ms after the new board; new-board wait %.0f -> %.0fms".format(newBoardWait, next))
+                    newBoardWait = next
                     firstLook = false
                 }
                 if (++unclear >= 12) {
@@ -1294,18 +1312,31 @@ class BotService : AccessibilityService() {
             unclear = 0
             if (firstLook && dirs.all { it == 0 }) {
                 // Still the old (solved) board: the new arrows aren't drawn yet. Look again as soon
-                // as Android allows, and start a little later next time.
-                newBoardWait = minOf(300L, newBoardWait + 25)
+                // as Android allows, and from now on wait past this delay.
+                val next = minOf(300.0, maxOf(newBoardWait, lookDelay + 15.0))
+                Log.i(TAG, "old board still showing ${lookDelay}ms after the button; new-board wait %.0f -> %.0fms".format(newBoardWait, next))
+                newBoardWait = next
                 firstLook = false
                 continue
             }
-            if (firstLook) { newBoardWait = maxOf(0L, newBoardWait - 3); firstLook = false }
+            if (firstLook) {
+                // Only a look taken right after the wait says the wait was long enough.
+                if (lookDelay <= newBoardWait + 8) newBoardWait = maxOf(0.0, newBoardWait - 0.25)
+                firstLook = false
+            }
             if (dirs.all { it == 0 }) {
-                // All up already: the game should be offering "Claim".
+                // All up already: the game should be offering "Claim". If it keeps not doing so,
+                // the remembered button may be the wrong view: find it again.
+                if (++allUpNoClaim >= 3) {
+                    Log.i(TAG, "board is solved but no Claim (button says \"${buttonText()}\"); re-reading the layout")
+                    allUpNoClaim = 0
+                    layout = readArrowLayout() ?: return true
+                }
                 phase = waitSolved
                 phaseStart = SystemClock.uptimeMillis() - ARROW_SETTLE_MS / 2
                 continue
             }
+            allUpNoClaim = 0
             val hard = layout.hex && dirs.all { it == 0 || it == 3 }
             val m = if (!layout.hex) 4 else if (hard) 2 else 6
             val state = if (hard) IntArray(dirs.size) { if (dirs[it] == 3) 1 else 0 } else dirs
@@ -1320,7 +1351,8 @@ class BotService : AccessibilityService() {
             if (preparedFor !== layout) { prepared.clear(); preparedFor = layout }
             val solver = prepared.getOrPut(m) { ArrowSolver.Prepared(layout.touching, m) }
             val taps = solver.solve(state)
-            Log.i(TAG, "arrow timing: since button ${shotAt - newBoardAt}ms (cpu ${shotCpu - newBoardCpu}ms), screenshot ${shotDone - shotAt}ms, read ${readDone - shotDone}ms, solve ${SystemClock.uptimeMillis() - readDone}ms (wait $newBoardWait)")
+            Log.i(TAG, "arrow timing: screenshot taken ${lookDelay}ms after the button (cpu ${shotCpu - newBoardCpu}ms), " +
+                "screenshot ${shotDone - shotAt}ms, read ${readDone - shotDone}ms, solve ${SystemClock.uptimeMillis() - readDone}ms (wait %.1f)".format(newBoardWait))
             if (taps == null) {
                 Log.i(TAG, "arrow board has no solution: misread, looking again")
                 layout = readArrowLayout() ?: return true
@@ -1331,6 +1363,7 @@ class BotService : AccessibilityService() {
             val points = order.map { val t = layout.tiles[it]; PointF((t[0] + t[2]) / 2f, (t[1] + t[3]) / 2f) }
             status("Arrow ${boardName(key)}: ${order.size} taps, tap ${settings.tapMs}+${settings.gapMs}ms" + sessionSummary())
             val t0 = SystemClock.uptimeMillis()
+            if (gameTaps == 0) tapsStart = t0
             when (tapPoints(points, ::alive)) {
                 TapResult.PAUSED -> { phase = fresh; lastGuard = 0; continue }
                 TapResult.FAILED -> { if (alive()) stopBot("Stopped: Android cancelled the taps"); return true }
@@ -1341,6 +1374,7 @@ class BotService : AccessibilityService() {
             gameTaps += order.size
             phase = waitSolved
             phaseStart = SystemClock.uptimeMillis()
+            tapsEnd = phaseStart
         }
         return true
     }
